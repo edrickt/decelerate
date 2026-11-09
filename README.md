@@ -87,6 +87,10 @@ Click the cursor icon in the menu bar:
 - Toggle **Remove acceleration** for the trackpad and/or the mouse.
 - **Settings…** (⌘,) opens the full window: launch at login, Dock icon,
   connected devices, live HID parameter state, and **Restore System Defaults**.
+
+| Settings — General | Settings — About |
+|---|---|
+| ![General](docs/settings-general.png) | ![About](docs/settings-about.png) |
 - **Quit** (⌘Q) restores macOS acceleration.
 
 ## Uninstall
