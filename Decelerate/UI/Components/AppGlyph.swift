@@ -2,8 +2,8 @@ import SwiftUI
 
 /// The app's visual mark: a pointer glyph on a tinted, continuous-corner tile.
 ///
-/// Used in the menu bar panel header and in the About tab. It is deliberately
-/// drawn from system colors so it matches the accent color, appearance and
+/// Used in the menu bar panel header and in the About tab. It is drawn from
+/// system colors so it matches the accent color, appearance and
 /// accessibility settings of the Mac.
 struct AppGlyph: View {
     var size: CGFloat = 34

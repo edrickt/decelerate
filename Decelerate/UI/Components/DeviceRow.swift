@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One row in the Settings → Devices list.
+/// One row in the Devices list in Settings.
 struct DeviceRow: View {
     let device: PointerDevice
 

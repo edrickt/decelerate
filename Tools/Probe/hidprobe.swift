@@ -1,4 +1,4 @@
-// hidprobe.swift — Decelerate HID research probe
+// Decelerate HID research probe (hidprobe.swift).
 //
 // Enumerates the IOHIDEventSystem services, dumps their properties (event-service
 // view + full IORegistry view), reads/writes acceleration-related properties and

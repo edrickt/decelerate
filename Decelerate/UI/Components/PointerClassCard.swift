@@ -4,8 +4,8 @@ import SwiftUI
 ///
 /// Acceleration is a continuous blend between no acceleration (0%, exact 1:1
 /// movement) and macOS's own curve (100%). Because an unaccelerated pointer is
-/// intentionally slower at normal hand speed, a separate Speed control scales
-/// the 1:1 movement — the Windows pointer-speed slider with "Enhance pointer
+/// slower at normal hand speed, a separate Speed control scales
+/// the 1:1 movement, like the Windows pointer-speed slider with "Enhance pointer
 /// precision" off. Its 0.5×–2× range is logarithmic so 1× sits in the middle.
 struct PointerClassCard: View {
     let pointerClass: PointerClass
@@ -45,7 +45,7 @@ struct PointerClassCard: View {
     private var accelerationCaption: String {
         switch percent {
         case 0:
-            return "No acceleration — 1:1 movement"
+            return "No acceleration: 1:1 movement"
         case 100:
             return "macOS default acceleration"
         default:
@@ -110,7 +110,7 @@ struct PointerClassCard: View {
                 Slider(value: speedPositionBinding, in: 0...1)
                     .controlSize(.small)
                     .accessibilityLabel("Speed for \(pointerClass.title.lowercased())")
-                    .help("0.5×–2× — 1.5× in the middle; 1× is geometry-true 1:1")
+                    .help("0.5×–2×, with 1.5× in the middle; 1× is geometry-true 1:1")
 
                 Text(speedText)
                     .font(.callout)

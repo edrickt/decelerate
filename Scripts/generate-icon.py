@@ -2,8 +2,7 @@
 """Generate Decelerate's macOS app icon into the asset catalog.
 
 Design: a native macOS squircle with a deep blue gradient, a white pointer
-arrow and fading "straight line" motion trails — the visual metaphor for
-1:1 movement (no acceleration curve).
+arrow and fading dots along a straight path, one dot per equal distance moved.
 
 Rendered at 4x and downsampled with Lanczos for clean edges at every size.
 Run:  python3 Scripts/generate-icon.py
@@ -85,8 +84,8 @@ def render() -> Image.Image:
     draw = ImageDraw.Draw(icon)
 
     # Motion trail: three evenly spaced dots along the cursor's straight path.
-    # Equal spacing and equal size are the "constant gain" idea — the same
-    # physical input always produces the same output, at any pointer speed.
+    # Equal spacing and equal size mean constant gain. The same physical input
+    # always produces the same output at any pointer speed.
     ux, uy = -0.7071, -0.7071  # unit vector the pointer travels along
     radius = 0.030 * s
     start = (0.600 * s, 0.610 * s)

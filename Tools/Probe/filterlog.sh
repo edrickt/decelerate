@@ -1,10 +1,10 @@
 #!/bin/bash
-# filterlog.sh — read-only view of the live IOHIDPointerScrollFilter decisions.
+# filterlog.sh prints a read-only view of the live IOHIDPointerScrollFilter decisions.
 #
 # macOS' WindowServer hosts IOHIDEventSystem and logs (at default log level) exactly
 # when it recomputes pointer acceleration: which key it used, the value, and whether
 # acceleration ended up enabled or disabled. This is the ground truth for "did my
-# property write actually reach the live accelerator?" — no root required.
+# property write actually reach the live accelerator?" It needs no root.
 #
 # Usage: ./filterlog.sh [seconds] [lines]
 #   ./filterlog.sh            # last 30 s, last 20 relevant lines

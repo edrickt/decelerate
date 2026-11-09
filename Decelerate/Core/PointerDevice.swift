@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Both the built-in trackpad and every connected mouse appear here. The UI
 /// uses this list for diagnostics ("2 devices detected") and the settings
-/// window's device tab; the actual acceleration control is per *class*.
+/// window's device tab; the actual acceleration control is per device class.
 struct PointerDevice: Identifiable, Hashable {
     enum Kind: String, Codable, Hashable {
         case trackpad

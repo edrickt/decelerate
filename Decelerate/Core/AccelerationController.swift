@@ -7,22 +7,23 @@ import Foundation
 /// pointer acceleration is applied by Apple's `IOHIDPointerScrollFilter` from
 /// system-wide parameters. A negative IOFixed value disables acceleration
 /// entirely (raw deltas pass through = exact 1:1). For intermediate amounts
-/// Decelerate feeds the filter a *blended acceleration curve* per pointer
+/// Decelerate feeds the filter a blended acceleration curve per pointer
 /// service: the device's own macOS curve interpolated toward the identity line.
 /// The filter caches those user curves per service and rebuilds its accelerator
 /// from them. Nothing is intercepted, no TCC permission is needed and no
 /// latency is added.
 ///
-/// Devices that only have a classic acceleration *table* (most third-party
+/// Devices that only have a classic acceleration table (most third-party
 /// mice) use the table's own linear interpolation between "identity" and
 /// "full acceleration": scaling the acceleration index by the chosen amount is
 /// exactly that blend, so no table rewriting is needed.
 ///
 /// Design goals, in order:
-///  1. **Native feel** — everything happens inside the HID pipeline.
-///  2. **Self-healing** — re-applied on wake, on device attach, and whenever
-///     macOS rewrites the parameters.
-///  3. **Reversible** — originals are snapshotted and restored exactly.
+///  1. The change happens inside the HID pipeline, so the pointer keeps
+///     macOS's own behavior.
+///  2. Settings re-apply on wake, on device attach, and whenever macOS
+///     rewrites the parameters.
+///  3. Originals are snapshotted and restored exactly.
 @MainActor
 final class AccelerationController {
     static let shared = AccelerationController()
@@ -79,7 +80,7 @@ final class AccelerationController {
         self.scanner = HIDDeviceScanner()
         // Snapshots written by older/buggy builds can be corrupt (a valid
         // acceleration value is a curve selector in a known range; a stray
-        // value like 1 selects the identity curve and makes the pointer feel
+        // value like 1 selects the identity curve and leaves the pointer
         // permanently slow). Validate every entry and derive a sane fallback
         // from the user's own macOS tracking-speed setting.
         var loaded = store.loadAccelerationOriginals()
@@ -101,7 +102,7 @@ final class AccelerationController {
     }
 
     /// Derives the acceleration value matching the user's macOS tracking-speed
-    /// slider, so "100%" really is their normal macOS feel even if our snapshot
+    /// slider, so "100%" matches their normal macOS setting even if our snapshot
     /// is missing or was corrupted.
     private static func trackingSpeedRaw(forKey key: String) -> Int32 {
         let defaultsKey = key == HIDPropertyKey.trackpadAcceleration
@@ -206,7 +207,8 @@ final class AccelerationController {
     // MARK: - Apply
 
     /// Applies the desired acceleration amount for both pointer classes.
-    /// Safe and cheap to call repeatedly; it is the self-healing entry point.
+    /// Safe and cheap to call repeatedly; this is the entry point used to
+    /// re-apply settings.
     func apply(_ preferences: [PointerClass: CategoryPreferences]) {
         desired = preferences
         guard parameters.isAvailable else {

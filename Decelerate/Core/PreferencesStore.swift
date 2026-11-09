@@ -2,8 +2,8 @@ import Foundation
 
 /// Persistence for Decelerate preferences.
 ///
-/// Deliberately a tiny `UserDefaults` wrapper: no Core Data, no files, so the
-/// app feels instantaneous and has nothing to corrupt. The HID layer is the
+/// A tiny `UserDefaults` wrapper: no Core Data, no files, so writes go straight
+/// to `UserDefaults` and there is nothing to corrupt. The HID layer is the
 /// only thing that touches system-wide state.
 struct PreferencesStore {
     private let defaults: UserDefaults
@@ -49,7 +49,7 @@ struct PreferencesStore {
     }
 
     // MARK: - Snapshot of the user's original HID parameters, so Decelerate can
-    // put the Mac back exactly as it was — including after a crash, because the
+    // put the Mac back exactly as it was, including after a crash, because the
     // snapshot survives relaunch.
 
     func saveAccelerationOriginals(_ values: [String: Int32]) {

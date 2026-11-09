@@ -4,7 +4,7 @@ import IOKit.hid
 
 /// Enumerates pointing devices through the public HID manager API.
 ///
-/// This is only used to *describe* hardware in the UI (and to notice
+/// This is only used to describe hardware in the UI (and to notice
 /// attach/detach). Acceleration is configured through `HIDEventSystem`,
 /// which talks to the event services that actually apply the curves.
 final class HIDDeviceScanner {

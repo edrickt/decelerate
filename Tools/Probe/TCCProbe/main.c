@@ -1,4 +1,4 @@
-// TCCProbe/main.c — proves the acceleration write needs no TCC permission.
+// TCCProbe/main.c proves the acceleration write needs no TCC permission.
 //
 // Built and run by ../tcc-test.sh as an ad-hoc signed .app bundle. The bundle has
 // never been granted Accessibility / Input Monitoring. It must still be able to read

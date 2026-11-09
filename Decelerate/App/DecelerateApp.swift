@@ -28,7 +28,7 @@ struct DecelerateApp: App {
 ///
 /// Decelerate is an `LSUIElement` menu bar app: clicking its menu bar panel does
 /// not activate the process, so SwiftUI's `openSettings` action can create the
-/// Settings window *behind* the frontmost app. Activating the app and ordering
+/// Settings window behind the frontmost app. Activating the app and ordering
 /// the window front fixes that. The window may be created a moment after the
 /// action runs, so the activation is retried briefly.
 @MainActor

@@ -1,69 +1,72 @@
 # Decelerate
 
-A tiny native macOS menu bar app that **tames pointer acceleration** for the
-built-in trackpad and for mice. At 0% the pointer moves **1:1** with your hand —
-the same feel as Windows with **“Enhance pointer precision” turned off** — and
-you can dial acceleration back in from 0% to macOS's own curve. It ships at
-**50% acceleration and 1.5× speed** as a balanced starting point.
+A native macOS menu bar app that controls pointer acceleration for the
+built-in trackpad and for mice. At 0% the pointer moves 1:1 with your hand, the
+same as Windows with "Enhance pointer precision" turned off, and you can dial
+acceleration back in from 0% to macOS's own curve. It ships at 50% acceleration
+and 1.5× speed.
 
-No event interception, no kernel extensions, no accessibility permissions, no
-latency. Decelerate works inside macOS's HID event system: it either removes the
-acceleration curve entirely or feeds the system a blended one.
+Decelerate does not intercept events, load kernel extensions, request
+accessibility permissions, or add latency. It works inside macOS's HID event
+system. It either removes the acceleration curve entirely or feeds the system a
+blended one.
 
 ![Decelerate menu bar panel](docs/panel.png)
 
 ## Why
 
-macOS accelerates the pointer with a velocity curve. It is handy on a small
-trackpad and infuriating when you want precision: the same physical movement
-travels different distances depending on how fast you move. Windows users turn
-off “Enhance pointer precision” to get linear movement; macOS has no such
-switch. Decelerate provides it, per device class:
+macOS accelerates the pointer with a velocity curve. That suits a small
+trackpad but makes precise pointing hard. The same physical movement travels
+different distances depending on how fast you move. Windows users turn this off
+with "Enhance pointer precision". macOS has no such switch. Decelerate adds one
+for each device class:
 
-- **Trackpad** — built-in trackpad and Magic Trackpad
-- **Mouse** — USB, Bluetooth and receiver-based mice
+- Trackpad: built-in trackpad and Magic Trackpad
+- Mouse: USB, Bluetooth and receiver-based mice
 
 ## How it works
 
 macOS keeps per-class pointer acceleration gains in the HID system's
 system-wide parameter dictionary (`HIDTrackpadAcceleration`,
-`HIDMouseAcceleration`, …) as IOFixed 16.16 numbers. A **negative** value is a
+`HIDMouseAcceleration`, …) as IOFixed 16.16 numbers. A negative value is a
 sentinel: Apple's `IOHIDPointerScrollFilter` returns before installing any
 accelerator, and the raw HID deltas reach the pointer unchanged. That is exact
 1:1 movement.
 
 Decelerate writes that sentinel through the public IOHIDSystem parameter
 connection (`IOServiceOpen(…, kIOHIDParamConnectType, …)` +
-`IOHIDSetCFTypeParameter`) — the same mechanism macOS uses for its own pointer
+`IOHIDSetCFTypeParameter`), the same mechanism macOS uses for its own pointer
 settings. It needs no root, no entitlements and no TCC permission, and it adds
 zero overhead to the input path because nothing is intercepted.
 
-For amounts between 0% and 100%, Decelerate delivers the HID filter a **blended
-acceleration curve** derived from the device's own macOS curve (gain(v) is
-interpolated toward 1.0), which the filter caches per pointer service. Devices
-whose acceleration comes from a classic lookup table (most third-party mice)
-instead use the table's built-in linear interpolation by scaling the
-acceleration index — again with no interception.
+For amounts between 0% and 100%, Decelerate delivers the HID filter a blended
+acceleration curve derived from the device's own macOS curve (gain(v) is
+interpolated toward 1.0). The filter caches that curve per pointer service.
+Devices whose acceleration comes from a classic lookup table (most third-party
+mice) instead use the table's built-in linear interpolation by scaling the
+acceleration index. Again, nothing is intercepted.
 
-The original values are snapshotted before the first write and restored when
-the feature is switched off or the app quits, so macOS is never left patched.
+Decelerate snapshots the original values before the first write and restores
+them when the feature is switched off or the app quits, so macOS is never left
+patched.
 
 ### Behaviour details
 
-- **Speed** is Decelerate's own slider (0.5×–2×, with **1.5× in the middle**;
-  default 1.5×). It scales the 1:1 movement directly, so it works with
-  acceleration fully off — that is the Windows "pointer speed" control. macOS's own Tracking speed still influences the
-  shape of the blended macOS curve at 100% and for intermediate amounts.
+- Speed is Decelerate's own slider (0.5×–2×, with 1.5× in the middle; default
+  1.5×). It scales the 1:1 movement directly, so it works with acceleration
+  fully off. This is the Windows "pointer speed" control. macOS's own Tracking
+  speed still sets the shape of the blended macOS curve at 100% and for
+  intermediate amounts.
 - For mice whose acceleration comes from the classic lookup table rather than a
-  parametric curve, the amount is applied by scaling the macOS acceleration
-  index — the table's own linear interpolation between identity and full
+  parametric curve, Decelerate scales the macOS acceleration index instead.
+  That is the table's own linear interpolation between identity and full
   acceleration.
-- **Scroll acceleration is untouched** — it is a separate HID parameter.
-- **State is self-healing**: Decelerate re-applies if macOS rewrites the
-  parameter (for example when you move the Tracking speed slider), after sleep,
-  and when a device is attached.
-- **Quitting restores macOS.** Any override is removed only while Decelerate is
-  running; the menu bar icon appears in the system menu bar when it is.
+- Scroll acceleration is untouched. It is a separate HID parameter.
+- Decelerate re-applies its state if macOS rewrites the parameter, for example
+  when you move the Tracking speed slider, after sleep, and when a device is
+  attached.
+- Quitting restores macOS. The override exists only while Decelerate runs, and
+  the menu bar icon shows that it is running.
 - A crash cannot leave the Mac permanently patched: the original values are
   persisted, and the next launch re-applies or restores correctly. Even without
   a snapshot, values reset at logout/reboot.
@@ -97,17 +100,17 @@ Mac. (macOS will list it under System Settings → General → Login Items.)
 
 Click the cursor icon in the menu bar:
 
-- **Acceleration** per device class: 0% = no acceleration (exact 1:1), 100% =
-  macOS's own curve, intermediate values are a real blend. Default **50%**.
-- **Speed** per device class: **0.5×–2×**, with **1.5× exactly in the middle**
-  of the slider; it scales the 1:1 movement — the Windows pointer-speed slider
-  with “Enhance pointer precision” off. Default **1.5×** (1× is geometry-true
-  1:1; raise it if that feels slow).
+- **Acceleration** per device class: 0% is no acceleration (exact 1:1), 100% is
+  macOS's own curve, and intermediate values are a real blend. Default 50%.
+- **Speed** per device class: 0.5×–2×, with 1.5× exactly in the middle of the
+  slider. It scales the 1:1 movement, the Windows pointer-speed slider with
+  "Enhance pointer precision" off. Default 1.5× (1× is geometry-true 1:1; raise
+  it for faster movement).
 - **Settings…** (⌘,) opens the full window: launch at login, Dock icon,
   connected devices, live HID parameter state, and **Restore System Defaults**.
 - **Quit** (⌘Q) restores macOS acceleration.
 
-| Settings — General | Settings — About |
+| General settings | About settings |
 |---|---|
 | ![General](docs/settings-general.png) | ![About](docs/settings-about.png) |
 
@@ -148,4 +151,4 @@ is no unit-test target yet.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

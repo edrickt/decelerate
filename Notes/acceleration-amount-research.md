@@ -1,4 +1,4 @@
-# Continuous acceleration amount (task-3): source-derived math + verified plumbing
+# Continuous acceleration amount (task-3): source-derived math and verified plumbing
 
 Machine: macOS 26.0.1 (25A362), Apple M-series. All experiments run live on 2026-11-08/09
 by `hid-researcher`; every write was restored; final state is the original one (§10).
@@ -6,18 +6,18 @@ Read with `Notes/acceleration-research.md` (the binary 1:1/disabled mechanism).
 
 ---
 
-## 1. TL;DR — what to ship
+## 1. TL;DR: what to ship
 
-A 0–100 % "Acceleration amount" slider is possible **without any event tap**, using the
+A 0–100 % "Acceleration amount" slider is possible without any event tap, using the
 filter's user-curve property (verified route) plus a source-derived blend formula.
 
 | Slider | Trackpad (parametric native) | Mouse with `HIDAccelCurves` (parametric) | Mouse table-only |
 |---|---|---|---|
-| **0 %** | disable acceleration: write **negative** `HIDTrackpadAcceleration` (raw −65536) as today | negative `HIDMouseAcceleration` | same |
-| **1–99 %** | install one blended curve via per-service `UserPointerAccelCurvesKey` (formula §4) | same, using the mouse's native curve | **do not ship intermediates** — keep 0 % / 100 % only (see §6); table baseline cannot be reproduced safely |
-| **100 %** | clear curves (`UserPointerAccelCurvesKey` = empty array) → filter falls back to native `HIDAccelCurves` | clear curves → native | clear curves → native table |
+| 0 % | disable acceleration: write negative `HIDTrackpadAcceleration` (raw −65536) as today | negative `HIDMouseAcceleration` | same |
+| 1–99 % | install one blended curve via per-service `UserPointerAccelCurvesKey` (formula §4) | same, using the mouse's native curve | **do not ship intermediates**: keep 0 % / 100 % only (see §6); table baseline cannot be reproduced safely |
+| 100 % | clear curves (`UserPointerAccelCurvesKey` = empty array) → filter falls back to native `HIDAccelCurves` | clear curves → native | clear curves → native table |
 
-**Critical correction to the earlier coefficient formula:** the identity term must be
+Critical correction to the earlier coefficient formula: the identity term must be
 scaled by `1/kCursorScale = 67/96`, not 1. The filter multiplies every algorithmic
 output by `kCursorScale = 96/67` (`IOHIDAccelerationAlgorithm.hpp: kCursorScale`;
 `multiplier()` returns `... * kCursorScale`). Therefore a 1:1 parametric curve needs
@@ -35,7 +35,7 @@ where `KC = 96/67`. If you use `GL' = 1 + f*(GL−1)` the slider jumps from true
 (gain 1.0 at f=0, the disabled mechanism) to gain ≈ `KC` = 1.43 at f→0+. Evidence for
 the 1/`KC` identity factor: `IOHIDSimpleAccelerator(value)` multiplies deltas by
 value directly, and the linear-scaling path is documented/implemented as
-`delta_out = delta_in * HIDMouseAcceleration` — so value 1.0 is raw passthrough
+`delta_out = delta_in * HIDMouseAcceleration`, so value 1.0 is raw passthrough
 (gain 1.0). The parametric algorithm's `multiplier()` adds `kCursorScale`, so its
 coefficients live in different units.
 
@@ -64,7 +64,7 @@ service = pointer event service (trackpad: registry 0x1000bf484 / AppleMultitouc
 IOHIDServiceClientSetProperty(service, "UserPointerAccelCurvesKey", CFArray of curve dicts)
 ```
 
-- The key string is literally **"UserPointerAccelCurvesKey"** (Lead verified from the
+- The key string is literally "UserPointerAccelCurvesKey" (Lead verified from the
   filter's own debug output; independently reproduced here). It corresponds to
   `kIOHIDUserPointerAccelCurvesKey` in Apple's source and is in the filter's
   `_cachedPropertyList`, so it is one of the few keys whose per-service write both
@@ -74,26 +74,26 @@ IOHIDServiceClientSetProperty(service, "UserPointerAccelCurvesKey", CFArray of c
   `acceleration 2.000000 resolution 400.000000 rate 67.000000` then `table index 0`
   (0 = index of our single curve in the supplied array; baseline without user curves
   shows `table index 7`, the native 10-curve selection for HIDTrackpadAcceleration=2.0).
-- **Persistence:** the value is cached in the filter's `_property` dict and survives
+- Persistence: the value is cached in the filter's `_property` dict and survives
   later rebuilds in the same filter instance. Verified across three different rebuild
   triggers: (a) another cached key write (`HIDScrollAcceleration`), (b) a kernel-param
   write (`IOHIDSetCFTypeParameter`, which arrives via `IOHIDSetHIDParameterToEventSystem`),
-  (c) rewriting `HIDTrackpadAcceleration` — all three re-ran setup and still logged
+  (c) rewriting `HIDTrackpadAcceleration`; all three re-ran setup and still logged
   `table index 0`.
-- **Clearing (f = 100 %):** writing an **empty CFArray** to `UserPointerAccelCurvesKey`
+- Clearing (f = 100 %): writing an empty CFArray to `UserPointerAccelCurvesKey`
   and triggering a rebuild makes the log return to `table index 7` (native fallback:
   `createPointerParametricAlgorithm` requires `userCurves.Count() > 0`; otherwise it
   reads service `HIDAccelCurves`). This is the clean f=1 "no intervention" state; it
   also overwrites the cached `_property` value, so no stale curves remain. Verified.
-- Writes must go through the **full** `IOHIDEventSystemClient` (dlsym
+- Writes must go through the full `IOHIDEventSystemClient` (dlsym
   `IOHIDEventSystemClientCreate`); `IOHIDEventSystemClientCreateSimpleClient` returns
   `false` for these SetProperty calls (see previous notes).
 - Kernel-param writes (`IOHIDSetCFTypeParameter(handle, "HIDUserPointerAccelCurves"...)`)
-  do **not** reach the filter (Lead verified; reproduced the same conclusion from the
+  do not reach the filter (Lead verified; reproduced the same conclusion from the
   cache/read paths). Event-system-client-level SetProperty also does not reach it.
   Per-service SetProperty is the only working route.
 
-### 2.2 TABLE route — tested end-to-end, does NOT work (do not use)
+### 2.2 TABLE route: tested end-to-end, does not work (do not use)
 
 The filter can also be rebuilt from `HIDPointerAccelerationTable` (CFData) when
 `HIDPointerAccelerationAlgorithm` is forced to Table (0). Test on the trackpad:
@@ -104,21 +104,21 @@ The filter can also be rebuilt from `HIDPointerAccelerationTable` (CFData) when
    count=15 should total 772 bytes = 10 + 7*6 + 8*90. The last point's low byte is
    missing in the live property.)
 2. Wrote a modified table via `IOHIDServiceClientSetProperty`: entry0 point1 y changed
-   16.0 → 9.0 (raw `0x00100000` → `0x00090000`), then forced
+   from 16.0 to 9.0 (raw `0x00100000` to `0x00090000`), then forced
    `HIDPointerAccelerationAlgorithm = 0`. The write was accepted (`true`), the filter
    did rebuild from a table (debug: `Acceleration table  Table: ...`,
-   `table index 1`), **but its parsed dump printed `y: 16(100000)` — the original
-   value, not 9.0.**
+   `table index 1`), but its parsed dump printed `y: 16(100000)`, the original
+   value, not 9.0.
 3. Conclusion: `HIDPointerAccelerationTable` is not in `_cachedPropertyList`, so no
    property event is delivered; and the transient per-service property is not visible
    to `IOHIDServiceCopyProperty(_service, kIOHIDPointerAccelerationTableKey)` used by
    `createPointerTableAlgorithm`. The table the filter uses is always the
    kernel/driver one. `HIDPointerAccelerationAlgorithm` (which *is* cached) is delivered
-   and does switch the algorithm — that part works.
+   and does switch the algorithm; that part works.
 4. Additional reason to avoid it: the live blob is truncated by one byte for the MT
    table (above), i.e. even the built-in data doesn't follow a clean byte count.
 
-So: **no user-space table installation on macOS 26.** The parametric user-curve route
+So: no user-space table installation on macOS 26. The parametric user-curve route
 is the only way to change the acceleration curve.
 
 ### 2.3 What the filter reads (source, IOHIDFamily main)
@@ -129,7 +129,7 @@ is the only way to change the acceleration curve.
    2=Default (fall through to normal selection). (Confirmed by behaviour: 0 switched to
    the table path; 2 restored the parametric path. Enum order matches the source switch.)
 2. Otherwise `createPointerParametricAlgorithm`: read
-   `kIOHIDUserPointerAccelCurvesKey`; `Count() > 0` → use those curves; else read service
+   `kIOHIDUserPointerAccelCurvesKey`; `Count() > 0` selects those curves; else read service
    `HIDAccelCurves` ("HIDAccelCurves"); else `createPointerTableAlgorithm`: service
    `HIDPointerAccelerationTable`, else the compiled-in `defaultAccelTable`.
 3. `_pointerAcceleration` comes from the type key (`HIDTrackpadAcceleration` /
@@ -151,7 +151,7 @@ is the only way to change the acceleration curve.
   - `_cachedPropertyList` (≈356–378): includes `HIDUserPointerAccelCurves` (as
     `kIOHIDUserPointerAccelCurvesKey`), `HIDPointerAccelerationMultiplier`,
     `HIDPointerAccelerationAlgorithm`, `HIDPointerAccelerationMinimum`, the
-    acceleration type/value keys. (Table key absent — hence §2.2.)
+    acceleration type/value keys. (Table key absent, hence §2.2.)
   - `createPointerParametricAlgorithm` (≈646–660): userCurves `Count()>0` gate; then
     service `HIDAccelCurves`.
   - `createPointerAlgorithm` (≈666–688): algorithm override switch; parametric tried
@@ -160,7 +160,7 @@ is the only way to change the acceleration curve.
     `HIDPointerResolution`; type-key lookup; `_pointerAcceleration < 0` ⇒ return (no
     accelerator); linear-scaling branch for `isMouseAcceleration` only.
 - `IOHIDEventSystemPlugIns/IOHIDAccelerationAlgorithm.cpp` /
-  `.hpp` — `IOHIDParametricAcceleration`:
+  `.hpp`: `IOHIDParametricAcceleration`:
   - curves are CFArray of CFDictionary with IOFixed keys `HIDAccelIndex`,
     `HIDAccelGainLinear`, `HIDAccelGainParabolic`, `HIDAccelGainCubic`,
     `HIDAccelGainQuartic`, `HIDAccelTangentSpeedLinear`,
@@ -175,14 +175,14 @@ is the only way to change the acceleration curve.
     `GainParabolic`, `TangentSpeedLinear`, `TangentSpeedParabolicRoot`
     (note: `GainQuartic` is NOT serialized).
 - `IOHIDEventSystemPlugIns/IOHIDAccelerationTable.cpp` / `.hpp`,
-  `IOHIDPointerScrollFilter.cpp` `defaultAccelTable` — table format
+  `IOHIDPointerScrollFilter.cpp` `defaultAccelTable`: table format
   (`ACCEL_TABLE`= scale u32, signature u32, count u16; entries = acceleration u32 BE,
   count u16 BE, points (x,y) s32 BE; `multiplier()` piecewise linear in
   resolution/rate-scaled x with y × `kCursorScale`).
-- `IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.h` — `kDefaultPointerResolutionFixed
+- `IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.h`: `kDefaultPointerResolutionFixed
   = 400<<16`, `kIOHIDDefaultReportRate = 60.0`, FRAME_RATE = 67.0 used as the rate in
   the algorithm constructors.
-- `IOHIDEventSystemPlugIns/IOHIDAcceleration.cpp` — `IOHIDPointerAccelerator::accelerate`:
+- `IOHIDEventSystemPlugIns/IOHIDAcceleration.cpp`: `IOHIDPointerAccelerator::accelerate`:
   velocity = floor(sqrt(dx²+dy²)) × rate/fixed multiplier; gain = multiplier/v;
   `IOHIDSimpleAccelerator::accelerate` = multiply by value (linear-scaling path).
 
@@ -219,7 +219,7 @@ TSPR = 917504/65536 = 14.0
 ```
 
 For a general acceleration value, apply Apple's index interpolation first (linear by
-Index ratio between adjacent entries) — the app should mirror `CreateWithParameters`
+Index ratio between adjacent entries). The app should mirror `CreateWithParameters`
 exactly so f=1 matches the live baseline.
 
 We want
@@ -250,10 +250,10 @@ its error is quantified in §5.
 
 Property: gain_f(v) is pointwise linear/monotone in f from 1 (f=0) to gain_native(v)
 (f=1). Output speed S_f is strictly increasing in v for every f∈[0,1] (derivative
-(1-f)/KC + f·S_n'(v) > 0), so no reversed/jittery movement — checked numerically over
+(1-f)/KC + f·S_n'(v) > 0), so no reversed/jittery movement, checked numerically over
 v∈[0,100] in `Tools/Probe/curve_math.py --analysis`.
 
-Numeric check (trackpad baseline, `curve_math.py`): rebuilt-from-coefficients vs the
+Numeric check (trackpad baseline, `curve_math.py`): rebuilt from coefficients against the
 ideal blend has ZERO error for segments 1–2; measured max |gain error| over v∈[0,150]
 for Scheme A (native TSPR):
 
@@ -273,7 +273,7 @@ exact by construction.
 
 ---
 
-## 5. Tail handling (TSPR choice) — the only place the blend deviates
+## 5. Tail handling (TSPR choice): the only place the blend deviates
 
 At small f the native sqrt tail shrinks and, if TSPR is left at the native 14, the
 rebuilt sqrt segment can produce gain < 1 at high v (decelerating tail, table above:
@@ -286,7 +286,7 @@ max |gain_f − ideal|):
 | B: per-f optimum TSPR (search) | 0.250 @29 | 0.272 @27 | 0.291 @150 | 0.287 @150 |
 | C: TSPR × 1/f (suggested earlier) | 1.42 @150 | 2.83 | 4.88 | 5.29 |
 
-**Recommendation: B, via a small lookup table**, because it removes the sub-1 tail while
+Recommendation: B, via a small lookup table, because it removes the sub-1 tail while
 keeping the error ≤ ~0.27 gain units in a normal speed range. For f ≥ 0.25 the native
 TSPR is already optimal; below 0.25 scale TSPR up:
 
@@ -298,7 +298,7 @@ f = 0.15   → 1.15                 f >= 0.25 → 1.00
 
 (interpolate linearly in f; `TSPR_raw = round(917504 * scale)`). Alternatively, if you
 prefer a formula, `TSPR_scale = 1 + 2.15 * max(0, 0.25 - f)` gets close to the optima
-(0.01→1.52 vs 3.15 optimum → slightly larger error at tiny f but min gain stays ≥1 if
+(0.01 gives 1.52 against the 3.15 optimum, so slightly larger error at tiny f but min gain stays ≥1 if
 combined with the slider's f=0 disable path). Full generated lookup including raw
 coefficients for f = 0.01 … 0.99 is in
 `Tools/Probe/out/trackpad-accel-amount-table.json`.
@@ -324,13 +324,13 @@ mice do not offer intermediates (§6).
    present in IORegistry, 400 dpi, rate 67) and the current
    `HIDTrackpadAcceleration`/`HIDMouseAcceleration` value (kernel param path readback is
    fine; e.g. 131072 = 2.0).
-2. Reproduce Apple's index interpolation for that value → native `(GL,GP,GC,GQ,TSL,TSPR)`.
+2. Reproduce Apple's index interpolation for that value to get the native `(GL,GP,GC,GQ,TSL,TSPR)`.
 3. For slider f: build one curve dict `{Index:0, GL',GP',GC',GQ', TSL', TSPR'}`, wrap it
    in a 1-element CFArray, write it to `UserPointerAccelCurvesKey` on that device's
    pointer event service with `IOHIDServiceClientSetProperty` (full client). Setting
    Index=0 with a single-element array makes it independent of the current acceleration
    value (it is used verbatim; no interpolation because there is no next entry).
-4. f=1: write an empty CFArray (or, equivalently, stop overriding and rebuild) → native.
+4. f=1: write an empty CFArray (or, equivalently, stop overriding and rebuild), which returns to native.
 5. f=0: write a negative acceleration value on the same service (raw −65536), which
    bypasses acceleration entirely (previous notes). If coming from f>0, also clear the
    user curves (empty array) to leave no stale shape if the filter rebuilds later.
@@ -348,7 +348,7 @@ After clearing: `table index 7` (native fallback).
 
 ### Mice
 - If the mouse's pointer event service exposes `HIDAccelCurves` (Apple-style devices and
-  possibly most HID mice — it's the filter's first choice): use exactly the trackpad
+  possibly most HID mice, since it's the filter's first choice): use exactly the trackpad
   procedure (read curves, index-interpolate, blend, per-service write).
 - If the service only has `HIDPointerAccelerationTable` (table-only mouse): **do not
   ship intermediate amounts yet.**
@@ -361,7 +361,7 @@ After clearing: `table index 7` (native fallback).
     ≈1.3 at v=80). Fitting our parametric family to a gain-domain blend of that baseline
     and identity gave poor results across TSL/TSPR/GQ sweeps:
     f=0.25 max err 0.143, f=0.50 0.286, f=0.75 0.429, f=0.95 0.543 (gain units) and
-    min gains below 1 — i.e. intermediate settings could feel slower/speed-dependent in
+    min gains below 1, i.e. intermediate settings could feel slower/speed-dependent in
     a way the blend is supposed to avoid, and we have no physical mouse on this machine
     to validate the baseline interpretation (resolution/report-rate/table units).
   - Recommended: for table-only mice expose only **Off (1:1)** and **System (100 %)**;
@@ -370,13 +370,13 @@ After clearing: `table index 7` (native fallback).
     `Tools/Probe/` + a simple A/B-by-ear test): if the table baseline's real-world gain
     is measured, a fit can be produced then.
   - If a continuous slider must be shown for every mouse, an alternative is a
-    CGEventTap gain layer (Accessibility permission required) — out of scope of the
+    CGEventTap gain layer (Accessibility permission required), out of scope of the
     native path and not recommended for v1.
 
 The two classes are independent: the user curves are set per *service*, so a trackpad
 curve and a mouse curve can differ (and the cache is per filter instance). Global
 kernel-param writes (IOHIDSetCFTypeParameter) can overwrite the per-service cached
-curves on all services — reapply per class after anything that writes the global
+curves on all services. Reapply per class after anything that writes the global
 trackpad/mouse acceleration values (e.g. System Settings tracking speed). See
 `Notes/acceleration-research.md` §5 for the mixed-layer caveat.
 
@@ -429,9 +429,9 @@ acceleration value; no absolute table is given here because no mouse was attache
 3. Dev verification: run `log stream --debug` and confirm the sequence
    `Acceleration key:UserPointerAccelCurvesKey`, `acceleration <value> resolution 400
    rate 67`, `table index 0` (or the index of your curve if multiple entries).
-4. f=1: write empty array (or stop overriding) → log shows `table index 7` (trackpad) /
+4. f=1: write empty array (or stop overriding); the log shows `table index 7` (trackpad) /
    table path for table-only devices.
-5. f=0: negative acceleration value → log shows `Pointer acceleration (disabled)`.
+5. f=0: negative acceleration value; the log shows `Pointer acceleration (disabled)`.
 6. Rebuild checks: write `HIDScrollAcceleration`/tracking-speed value and confirm
    `table index 0` persists (tested here); after clearing confirm native.
 7. Restore on quit: original acceleration values + clear user curves; verify
@@ -443,7 +443,7 @@ acceleration value; no absolute table is given here because no mouse was attache
 
 ## 9. Probe additions (Tools/Probe/)
 
-- `curve_math.py` — Python reimplementation of Apple's parametric + table algorithms:
+- `curve_math.py`: Python reimplementation of Apple's parametric + table algorithms:
   `--analysis` (trackpad blend, tail strategies, monotonicity), `--mouse` (compiled-in
   default table model + parametric fit), default mode (curve dicts, gain tables,
   expected serialization). Used to generate every number in this note.
@@ -463,7 +463,7 @@ All changes made during this task were restored:
 `HIDTrackpadAcceleration = 131072 (2.0)`, `HIDMouseAcceleration = 45056 (0.6875)`,
 `HIDPointerAcceleration = 45056`, `HIDUseLinearScalingMouseAcceleration = 0`,
 `HIDScrollAcceleration = 20480`; trackpad service: original table bytes (verified
-byte-identical), `UserPointerAccelCurvesKey` cleared (empty array → native fallback),
+byte-identical), `UserPointerAccelCurvesKey` cleared (empty array, native fallback),
 `HIDPointerAccelerationAlgorithm` back to Default(2). Live filter: `Pointer acceleration
 (enabled) HIDTrackpadAcceleration:131072 ... 131072`, native curve selection
 (`table index 7`). No WindowServer restart, no root, no defaults written.
@@ -478,7 +478,7 @@ clear when the slider is at 100 % or the feature is off.
 
 1. Mouse hardware test: attach an external mouse, check whether its service exposes
    `HIDAccelCurves` (then continuous slider works exactly). If table-only, keep
-   binary-only until measured; `tapmeasure` can measure raw-vs-delivered gain.
+   binary-only until measured; `tapmeasure` can measure raw gain against delivered gain.
 2. Optional: confirm `kIOHIDUserPointerAccelCurvesKey` string from IOKit private headers
    (we only have the behavioural evidence + Apple source use; the literal
    "UserPointerAccelCurvesKey" is verified by the filter's own debug output).
@@ -488,7 +488,7 @@ clear when the slider is at 100 % or the feature is off.
 
 ---
 
-## 11. Implementation note — Decelerate 1.1 (Lead)
+## 11. Implementation note: Decelerate 1.1 (Lead)
 
 The shipped app follows §1–§6 for trackpads and any device exposing
 `HIDAccelCurves`: 0% = negative acceleration value (hard 1:1), 1–99% = one
@@ -499,7 +499,7 @@ tracking-speed index still selects/ interpolates curves), 100% = empty array
 `Tools/Probe/out/trackpad-accel-amount-table.json` byte-for-byte for f = 0.25
 and 0.5 (verified).
 
-**Table-only mice** use a different, simpler route than the parametric fit
+Table-only mice use a different, simpler route than the parametric fit
 discussed in §6: the table's own interpolation is linear in the acceleration
 index, so scaling `HIDMouseAcceleration` by the amount is *exactly* the blend
 between identity and full acceleration for the compiled-in 2-entry default
@@ -516,7 +516,7 @@ tables would give an approximate amount rather than an exact blend.
 
 ## 12. Corrections after 1.2 debugging (Lead)
 
-**The §4 `kCursorScale` correction is wrong, and was reverted in 1.2.** In the
+The §4 `kCursorScale` correction is wrong, and was reverted in 1.2. In the
 filter, `IOHIDParametricAcceleration::multiplier()` returns
 `kCursorScale · S(v/deviceScale)` with `deviceScale = resolution/rate`. The
 accelerator then computes `mult = multiplier(velocity)/velocity`, so the output
@@ -524,17 +524,17 @@ ratio for a coefficient set is `kCursorScale · S(v/deviceScale) / velocity`.
 For a pure linear curve `S = GL·v` with `v = velocity/deviceScale` that is
 `kCursorScale · GL / deviceScale = (96/67)·(67/400)·GL = (96/400)·GL`. For a
 400-count-per-inch trackpad on a 96-dpi surface `96/400 = 0.24 points/count` is
-exactly the physical 1:1 conversion, so **`GL = 1.0` is the identity**, not
+exactly the physical 1:1 conversion, so `GL = 1.0` is the identity, not
 `1/kCursorScale`. The ×96/67 and the ×67/400 partially cancel. Using
 `1/kCursorScale` made every low-amount setting ~30% slower than 1:1 (one more
 source of the "really slow" report).
 
-**Snapshot corruption bug (root cause of the v1.1 "slow everywhere" report).**
+Snapshot corruption bug (root cause of the v1.1 "slow everywhere" report).
 The persisted snapshot of the original acceleration values
 (`system.accelerationOriginals`) was written with
 `HIDTrackpadAcceleration = 1` (raw IOFixed `1/65536`, i.e. curve index ≈ 0)
 instead of `131072`. Every apply at amount > 0 therefore restored the identity
-curve, which is flat (no acceleration) — so 100%, 40% and every other amount
+curve, which is flat (no acceleration). So 100%, 40% and every other amount
 felt identical and slow. 1.2 validates the snapshot (`8192…196608`), discards
 implausible entries, and re-derives them from the macOS Tracking-speed
 preferences (`com.apple.trackpad.scaling` / `com.apple.mouse.scaling`).
@@ -542,7 +542,7 @@ Additional 1.2 hardening: property callbacks are suppressed for 0.75 s after
 our own writes (no echo feedback), a class with no attached devices is never
 index-scaled, and teardown stops observation before restoring parameters.
 
-**Speed control (1.2).** Because macOS's unaccelerated pointer is geometry-true
+Speed control (1.2). Because macOS's unaccelerated pointer is geometry-true
 1:1 (0.24 points per trackpad count), it feels slow at ordinary hand speed.
 1.2 adds a Speed multiplier that scales the gain curve: coefficients are scaled
 by `s, √s, ∛s, ⁴√s` so `gain'(v) = s·gain(v)`, including at 0 % acceleration

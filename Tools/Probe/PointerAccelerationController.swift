@@ -1,12 +1,12 @@
 // PointerAccelerationController.swift
-// Decelerate — drop-in pointer-acceleration override for macOS 13+/26.
+// Drop-in pointer-acceleration override used by Decelerate (macOS 13+/26).
 // Verified on macOS 26.0.1 (build 25A362), Apple M-series.
 //
-// Mechanism: IOHIDSystem's kernel-global parameter dictionary. Writing a NEGATIVE
+// Mechanism: IOHIDSystem's kernel-global parameter dictionary. Writing a negative
 // IOFixed value to "HIDTrackpadAcceleration" / "HIDMouseAcceleration" makes
 // IOHIDPointerScrollFilter install no acceleration curve at all, so raw HID deltas
-// pass through unchanged -> exact 1:1 linear pointer movement, for the built-in
-// trackpad and for mice. This is the macOS equivalent of turning OFF
+// pass through unchanged, giving exact 1:1 linear pointer movement for the built-in
+// trackpad and for mice. This is the macOS equivalent of turning off
 // "Enhance pointer precision" in Windows.
 //
 // API: IOHIDParamConnectType (public, deprecated but exported):
@@ -15,7 +15,7 @@
 //   IOHIDCopyCFTypeParameter(handle, key, &out)   // read current value (for restore)
 //   IOHIDSetCFTypeParameter(handle, key, value)   // write raw IOFixed value
 //
-// Requires NO root, NO TCC permission, NO entitlements; works from an ad-hoc signed,
+// Requires no root, no TCC permission, and no entitlements; works from an ad-hoc signed,
 // non-sandboxed local build (verified with an app whose AXIsProcessTrusted()==false).
 //
 // Values are IOFixed 16.16: raw = round(value * 65536).
@@ -88,8 +88,9 @@ final class PointerAccelerationController {
         IOHIDSetCFTypeParameter(handle, key.rawValue as CFString, NSNumber(value: raw)) == KERN_SUCCESS
     }
 
-    /// Writes a *speed* value (IOFixed conversion done by IOKit). MUST be >= 0;
-    /// IOKit clamps negative values to 0 (verified), so this cannot disable acceleration.
+    /// Writes a speed value (IOFixed conversion done by IOKit). The value must be
+    /// zero or greater; IOKit clamps negative values to 0 (verified), so this cannot
+    /// disable acceleration.
     @discardableResult
     func setAccelerationSpeed(_ value: Double, for key: Key) -> Bool {
         IOHIDSetAccelerationWithKey(handle, key.rawValue as CFString, value) == KERN_SUCCESS

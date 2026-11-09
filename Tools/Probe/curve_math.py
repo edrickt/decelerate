@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""curve_math.py — source-derived math for Decelerate's continuous acceleration amount.
+"""Source-derived math for Decelerate's continuous acceleration amount.
 
 Reimplements Apple's IOHIDPointerScrollFilter pointer acceleration pipeline exactly as
 published in IOHIDFamily (IOHIDEventSystemPlugIns/IOHIDAccelerationAlgorithm.cpp,
@@ -11,8 +11,8 @@ Units / constants (straight from the source):
     raw / 65536.  They are coefficients in standardized speed units.
   * tangent speeds are also IOFixed, in the same standardized speed units.
   * the filter standardizes velocity:  v_std = v_counts_per_event / (resolution/rate)
-    with resolution = pointer resolution in dpi (IOFixed 400 here -> 400.0) and
-    rate = FRAME_RATE = 67.0 (constant in the source, NOT the device report rate).
+    with resolution = pointer resolution in dpi (IOFixed 400 here means 400.0) and
+    rate = FRAME_RATE = 67.0 (constant in the source, not the device report rate).
   * the algorithm's multiplier() returns accelerated_speed * kCursorScale,
     kCursorScale = 96/67.  The filter's applied gain is multiplier(v)/v.
   * therefore the parametric curve S(v) produces gain g(v) = kCursorScale * S(v)/v,
@@ -22,8 +22,8 @@ Segments (source comments + code):
   1) v <= TSL:              S(v) = GL*v + (GP*v)^2 + (GC*v)^3 + (GQ*v)^4
   2) TSL < v <= TSPR:       S(v) = m0*v + b0, tangent line of segment 1 at TSL
   3) v > TSPR:              S(v) = sqrt(m1*v + b1), tangent of segment 2 at TSPR
-  special cases: TSL==0 -> only segments 1 and 3 (root used as tangent point);
-                 TSPR==0 -> only segments 1 and 2; both 0 -> segment 1 only.
+  special cases: TSL==0 means only segments 1 and 3 (root used as tangent point);
+                 TSPR==0 means only segments 1 and 2; both 0 means segment 1 only.
 """
 
 import json
@@ -150,8 +150,8 @@ class Parametric:
 
 def blend(native, f):
     """Continuous acceleration-amount curve.
-    Desired: gain_f(v) = (1-f)*1 + f*gain_native(v)
-             <=> S_f(v) = (1-f)*(v/KC) + f*S_native(v)
+    Desired: gain_f(v) = (1-f)*1 + f*gain_native(v),
+             equivalently S_f(v) = (1-f)*(v/KC) + f*S_native(v)
     Representable exactly by scaling coefficients:
       GL_f = (1-f)/KC + f*GL
       GP_f = sqrt(f)*GP,  GC_f = f^(1/3)*GC,  GQ_f = f^(1/4)*GQ
@@ -504,7 +504,7 @@ def fit_parametric(target_gain, f, tsl=7.0, tspr=14.0, fit_max=7.0):
         xs.append(v)
         ys.append(v * target / KC)
         v += 0.02
-    # S = GL*v + GP^2*v^2 + GC^3*v^3  -> linear in u=[GL,GP^2,GC^3]
+    # S = GL*v + GP^2*v^2 + GC^3*v^3, linear in u=[GL,GP^2,GC^3]
     A = [[x, x * x, x ** 3] for x in xs]
     # normal equations
     N = [[sum(A[k][i] * A[k][j] for k in range(len(xs))) for j in range(3)] for i in range(3)]

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Builds custom pointer-acceleration curves that blend natively between
-/// macOS's own acceleration (`factor` = 1) and perfectly linear movement
+/// macOS's own acceleration (`factor` = 1) and linear movement
 /// (`factor` = 0), with an independent speed multiplier.
 ///
 /// The math mirrors Apple's `IOHIDPointerScrollFilter` /
@@ -95,7 +95,7 @@ enum AccelerationCurveBuilder {
         return result
     }
 
-    /// Keeps the high-velocity tail honest at small factors: the native
+    /// Keeps the high-velocity tail correct at small factors: the native
     /// parabolic-root breakpoint makes the √ segment kick in too early once the
     /// coefficients are heavily damped, which would make the tail decelerate.
     /// These factors (from the research) push it out just enough.

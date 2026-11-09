@@ -1,4 +1,4 @@
-// windowshot.swift — capture a single app window (not the whole screen).
+// windowshot.swift captures a single app window (not the whole screen).
 //
 // Usage: swift Scripts/windowshot.swift <owner-name> <output.png>
 // Finds the largest on-screen window owned by <owner-name> and asks

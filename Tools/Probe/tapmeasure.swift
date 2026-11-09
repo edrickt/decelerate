@@ -1,4 +1,4 @@
-// tapmeasure.swift — measure delivered pointer deltas (and, optionally, raw HID deltas)
+// tapmeasure.swift measures delivered pointer deltas (and, optionally, raw HID deltas)
 // to characterise pointer acceleration gain at different velocities.
 //
 // Modes:
@@ -7,7 +7,7 @@
 //       Prints count, delta statistics (p50/p95/max |dx|, gain per velocity bucket if
 //       raw HID values are also available) and can write a CSV of every event.
 //       Needs Accessibility/Input Monitoring TCC when run as a bare binary; no TCC
-//       needed at all when the process already has it (this research session does).
+//       needed when the process already has it (this research session does).
 //
 //   tapmeasure post <dx> <count>
 //       Smoke test: posts synthetic mouse-moved CGEvents (no HID acceleration applied),
@@ -17,7 +17,7 @@
 // physical mouse/trackpad during that window; then toggle state with hidprobe
 // (`hidprobe param-set HIDMouseAcceleration fixed:-1`) and repeat.
 //
-// NOTE: synthetic HID injection (IOHIDUserDevice) is NOT possible without Apple's
+// NOTE: synthetic HID injection (IOHIDUserDevice) is not possible without Apple's
 // "com.apple.developer.hid.virtual.device" entitlement (verified: creation returns NULL),
 // so this rig needs real physical input.
 

@@ -35,8 +35,8 @@ enum PointerClass: String, CaseIterable, Codable, Identifiable, Hashable {
 }
 
 /// Maps the Speed slider's 0…1 position to the multiplier, so the default
-/// **1.5× sits exactly in the middle** of the 0.5×–2.0× range. Each half is a
-/// logarithmic segment (0.5 → 1.5 → 2.0), giving fine control around the
+/// 1.5× sits exactly in the middle of the 0.5×–2.0× range. Each half is a
+/// logarithmic segment (0.5 to 1.5 to 2.0), giving fine control around the
 /// middle without a symmetric (and therefore oddly ranged) scale.
 enum SpeedScale {
     static let minimumSpeed = 0.5

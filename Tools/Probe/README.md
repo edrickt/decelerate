@@ -1,11 +1,11 @@
-# Decelerate — research probes (macOS pointer acceleration)
+# Decelerate: research probes (macOS pointer acceleration)
 
 Everything here was used to produce `../../Notes/acceleration-research.md`, on a real
 Mac (macOS 26.0.1, build 25A362, Apple silicon). Build with `./build.sh`.
 
 ## The short version
 
-The app needs **no root, no TCC permission, no entitlement**. It disables pointer
+The app needs no root, no TCC permission, no entitlement. It disables pointer
 acceleration (true 1:1 movement) by writing a negative IOFixed value into IOHIDSystem's
 global parameter dictionary, using the public (deprecated) `IOHIDParamConnectType` API:
 
@@ -21,8 +21,8 @@ IOHIDSetCFTypeParameter(handle, "HIDMouseAcceleration"    as CFString, NSNumber(
 ```
 
 `PointerAccelerationController.swift` is the compiling drop-in implementation.
-`HIDUseLinearScalingMouseAcceleration = 1` is **mouse-only** and a no-op for the
-built-in trackpad — do not use it for the trackpad.
+`HIDUseLinearScalingMouseAcceleration = 1` is mouse-only and a no-op for the
+built-in trackpad, so do not use it for the trackpad.
 
 ## Tools
 

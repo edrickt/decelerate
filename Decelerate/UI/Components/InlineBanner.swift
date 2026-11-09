@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Small inline notice used for permission, error, and empty states.
 ///
-/// Kept deliberately lightweight so it reads like a system alert inside the
+/// Kept lightweight so it reads like a system alert inside the
 /// menu bar panel instead of custom-drawn chrome.
 struct InlineBanner: View {
     let systemImage: String

@@ -1,5 +1,5 @@
 #!/bin/bash
-# tcc-test.sh — proves the pointer-acceleration write needs no TCC permission.
+# tcc-test.sh proves the pointer-acceleration write needs no TCC permission.
 #
 # Builds an ad-hoc signed app bundle containing a tiny binary that never asks for
 # Accessibility/Input Monitoring, runs it with `open`, and prints:

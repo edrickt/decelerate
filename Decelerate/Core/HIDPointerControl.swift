@@ -4,11 +4,11 @@ import IOKit.hidsystem
 
 /// Pointer-acceleration parameters of the HID system.
 ///
-/// Values are IOFixed (16.16 fixed point). A **negative** value has a special
+/// Values are IOFixed (16.16 fixed point). A negative value has a special
 /// meaning: Apple's `IOHIDPointerScrollFilter` returns before installing any
-/// accelerator, so raw HID deltas reach the pointer unchanged — exact 1:1
-/// linear movement (the macOS equivalent of Windows "Enhance pointer
-/// precision" off).
+/// accelerator, so raw HID deltas reach the pointer unchanged. That is exact
+/// 1:1 linear movement, the macOS equivalent of Windows "Enhance pointer
+/// precision" off.
 enum HIDPointerParameter {
     /// Trackpad acceleration (`HIDPointerAccelerationType` is
     /// `HIDTrackpadAcceleration` on Apple trackpads).
@@ -43,7 +43,7 @@ enum HIDPointerParameter {
 ///
 /// Change notifications come from the full `IOHIDEventSystemClient` (its create
 /// and callback-registration entry points are not in the SDK headers, so they
-/// are resolved at runtime). That is an optional enhancement: if it is
+/// are resolved at runtime). That is optional: if it is
 /// unavailable the controller still re-applies on wake/attach/launch.
 final class HIDPointerControl {
     typealias ChangeCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, CFString?, CFTypeRef?) -> Void

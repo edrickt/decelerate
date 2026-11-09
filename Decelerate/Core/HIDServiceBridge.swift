@@ -22,8 +22,8 @@ enum HIDPropertyKey {
     /// Overrides which acceleration algorithm the filter builds
     /// (0 = table, 1 = parametric, 2 = default).
     static let algorithm = "HIDPointerAccelerationAlgorithm"
-    /// Per-service user-supplied parametric curves. **This is the literal key
-    /// string the filter looks up** (verified from the WindowServer debug log),
+    /// Per-service user-supplied parametric curves. This is the literal key
+    /// string the filter looks up (verified from the WindowServer debug log),
     /// despite the Apple constant being named `kIOHIDUserPointerAccelCurvesKey`.
     static let userCurves = "UserPointerAccelCurvesKey"
 
@@ -72,7 +72,7 @@ struct HIDPointerService {
 
 /// Access to the pointer event services and their acceleration properties.
 ///
-/// The *simple* client declared in the SDK is read-only; configuration needs the
+/// The simple client declared in the SDK is read-only; configuration needs the
 /// full `IOHIDEventSystemClient` whose create function is not in the SDK
 /// headers, so it is resolved at runtime. `CopyProperty`/`SetProperty` on
 /// services are public API.
