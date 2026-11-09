@@ -162,7 +162,7 @@ final class AppState: ObservableObject {
 
     func setSpeedMultiplier(_ speed: Double, for pointerClass: PointerClass) {
         var value = preferences(for: pointerClass)
-        let clamped = min(max(speed, 0.5), 6)
+        let clamped = min(max(speed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
         guard value.speedMultiplier != clamped else { return }
         value.speedMultiplier = clamped
         setPreferences(value, for: pointerClass)

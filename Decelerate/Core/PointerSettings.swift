@@ -34,6 +34,23 @@ enum PointerClass: String, CaseIterable, Codable, Identifiable, Hashable {
     }
 }
 
+/// Maps the Speed slider's 0…1 position to the multiplier on a logarithmic
+/// scale, so 1.0× sits exactly in the middle of the 0.5×–2.0× range.
+enum SpeedScale {
+    static let minimumSpeed = 0.5
+    static let maximumSpeed = 2.0
+
+    static func position(for speed: Double) -> Double {
+        let clamped = min(max(speed, minimumSpeed), maximumSpeed)
+        return (log2(clamped) + 1.0) / 2.0
+    }
+
+    static func speed(for position: Double) -> Double {
+        let clamped = min(max(position, 0), 1)
+        return pow(2.0, clamped * 2.0 - 1.0)
+    }
+}
+
 /// User-facing settings for one pointer class.
 struct CategoryPreferences: Codable, Equatable, Hashable {
     /// How much of macOS's pointer acceleration to apply.
@@ -42,19 +59,19 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
     /// pointer the same distance (1:1, like Windows with "Enhance pointer
     /// precision" off). 1 = exactly macOS's own acceleration curve. Values in
     /// between blend the two natively inside the HID pipeline.
-    var accelerationAmount: Double = 0
+    var accelerationAmount: Double = 0.5
 
     /// Pointer speed multiplier for 1:1 movement. macOS's "no acceleration"
     /// passthrough is a geometry-true 1:1 (one device count per 96-dpi point),
     /// which is much slower than an accelerated pointer at ordinary hand speed.
     /// Windows' "Enhance pointer precision off" has a pointer-speed slider; this
     /// is the equivalent. 1.0 = pure physical 1:1.
-    var speedMultiplier: Double = 3.0
+    var speedMultiplier: Double = 1.0
 
     var isLinear: Bool { accelerationAmount <= 0.005 }
     var isNative: Bool { accelerationAmount >= 0.995 }
 
-    init(accelerationAmount: Double = 0, speedMultiplier: Double = 3.0) {
+    init(accelerationAmount: Double = 0.5, speedMultiplier: Double = 1.0) {
         self.accelerationAmount = accelerationAmount
         self.speedMultiplier = speedMultiplier
     }
@@ -75,9 +92,10 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
             // Version 1.0 stored a boolean; true meant "fully linear".
             accelerationAmount = removed ? 0 : 1
         } else {
-            accelerationAmount = 0
+            accelerationAmount = 0.5
         }
-        speedMultiplier = try container.decodeIfPresent(Double.self, forKey: .speedMultiplier) ?? 3.0
+        let decodedSpeed = try container.decodeIfPresent(Double.self, forKey: .speedMultiplier) ?? 1.0
+        speedMultiplier = min(max(decodedSpeed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
     }
 
     func encode(to encoder: Encoder) throws {

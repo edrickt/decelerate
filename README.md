@@ -3,7 +3,8 @@
 A tiny native macOS menu bar app that **tames pointer acceleration** for the
 built-in trackpad and for mice. At 0% the pointer moves **1:1** with your hand —
 the same feel as Windows with **“Enhance pointer precision” turned off** — and
-you can dial acceleration back in from 0% to macOS's own curve.
+you can dial acceleration back in from 0% to macOS's own curve. It ships at
+**50% acceleration and 1× speed** as a balanced starting point.
 
 No event interception, no kernel extensions, no accessibility permissions, no
 latency. Decelerate works inside macOS's HID event system: it either removes the
@@ -49,9 +50,9 @@ the feature is switched off or the app quits, so macOS is never left patched.
 
 ### Behaviour details
 
-- **Speed** is Decelerate's own slider (0.5×–6×). It scales the 1:1 movement
-  directly, so it works with acceleration fully off — that is the Windows
-  "pointer speed" control. macOS's own Tracking speed still influences the
+- **Speed** is Decelerate's own slider (0.5×–2×, logarithmic with 1× in the
+  middle; default 1×). It scales the 1:1 movement directly, so it works with
+  acceleration fully off — that is the Windows "pointer speed" control. macOS's own Tracking speed still influences the
   shape of the blended macOS curve at 100% and for intermediate amounts.
 - For mice whose acceleration comes from the classic lookup table rather than a
   parametric curve, the amount is applied by scaling the macOS acceleration
@@ -96,14 +97,19 @@ Mac. (macOS will list it under System Settings → General → Login Items.)
 
 Click the cursor icon in the menu bar:
 
-- Toggle **Remove acceleration** for the trackpad and/or the mouse.
+- **Acceleration** per device class: 0% = no acceleration (exact 1:1), 100% =
+  macOS's own curve, intermediate values are a real blend. Default **50%**.
+- **Speed** per device class: **0.5×–2×** on a logarithmic scale with **1× in
+  the middle**; it scales the 1:1 movement — the Windows pointer-speed slider
+  with “Enhance pointer precision” off. Default **1×** (geometry-true 1:1;
+  raise it if that feels slow).
 - **Settings…** (⌘,) opens the full window: launch at login, Dock icon,
   connected devices, live HID parameter state, and **Restore System Defaults**.
+- **Quit** (⌘Q) restores macOS acceleration.
 
 | Settings — General | Settings — About |
 |---|---|
 | ![General](docs/settings-general.png) | ![About](docs/settings-about.png) |
-- **Quit** (⌘Q) restores macOS acceleration.
 
 ## Uninstall
 

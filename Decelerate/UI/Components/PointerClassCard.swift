@@ -6,7 +6,7 @@ import SwiftUI
 /// movement) and macOS's own curve (100%). Because an unaccelerated pointer is
 /// intentionally slower at normal hand speed, a separate Speed control scales
 /// the 1:1 movement — the Windows pointer-speed slider with "Enhance pointer
-/// precision" off.
+/// precision" off. Its 0.5×–2× range is logarithmic so 1× sits in the middle.
 struct PointerClassCard: View {
     let pointerClass: PointerClass
 
@@ -29,7 +29,17 @@ struct PointerClassCard: View {
     }
 
     private var speedText: String {
-        String(format: "%.1f×", speed)
+        String(format: "%.2f×", speed)
+    }
+
+    /// Logarithmic mapping so 1.00× is exactly the middle of the slider.
+    private var speedPositionBinding: Binding<Double> {
+        Binding(
+            get: { SpeedScale.position(for: speed) },
+            set: { position in
+                state.setSpeedMultiplier(SpeedScale.speed(for: position), for: pointerClass)
+            }
+        )
     }
 
     private var accelerationCaption: String {
@@ -97,10 +107,10 @@ struct PointerClassCard: View {
                     .frame(width: 34, alignment: .leading)
                     .accessibilityHidden(true)
 
-                Slider(value: state.binding(for: pointerClass).speedMultiplier, in: 0.5...6.0)
+                Slider(value: speedPositionBinding, in: 0...1)
                     .controlSize(.small)
                     .accessibilityLabel("Speed for \(pointerClass.title.lowercased())")
-                    .help("Scales 1:1 movement — 1.0× is geometry-true, 3.0× is the default")
+                    .help("0.5×–2× — 1× in the middle is geometry-true 1:1")
 
                 Text(speedText)
                     .font(.callout)
@@ -112,7 +122,7 @@ struct PointerClassCard: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(accelerationCaption)
-                Text("Move faster without acceleration.")
+                Text("Speed 0.5×–2× · 1× is true 1:1")
                     .foregroundStyle(.tertiary)
             }
             .font(.caption)
