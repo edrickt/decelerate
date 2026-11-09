@@ -34,20 +34,33 @@ enum PointerClass: String, CaseIterable, Codable, Identifiable, Hashable {
     }
 }
 
-/// Maps the Speed slider's 0…1 position to the multiplier on a logarithmic
-/// scale, so 1.0× sits exactly in the middle of the 0.5×–2.0× range.
+/// Maps the Speed slider's 0…1 position to the multiplier, so the default
+/// **1.5× sits exactly in the middle** of the 0.5×–2.0× range. Each half is a
+/// logarithmic segment (0.5 → 1.5 → 2.0), giving fine control around the
+/// middle without a symmetric (and therefore oddly ranged) scale.
 enum SpeedScale {
     static let minimumSpeed = 0.5
+    static let middleSpeed = 1.5
     static let maximumSpeed = 2.0
 
     static func position(for speed: Double) -> Double {
         let clamped = min(max(speed, minimumSpeed), maximumSpeed)
-        return (log2(clamped) + 1.0) / 2.0
+        if clamped <= middleSpeed {
+            let ratio = log(clamped / minimumSpeed) / log(middleSpeed / minimumSpeed)
+            return 0.5 * ratio
+        }
+        let ratio = log(clamped / middleSpeed) / log(maximumSpeed / middleSpeed)
+        return 0.5 + 0.5 * ratio
     }
 
     static func speed(for position: Double) -> Double {
         let clamped = min(max(position, 0), 1)
-        return pow(2.0, clamped * 2.0 - 1.0)
+        if clamped <= 0.5 {
+            let ratio = clamped / 0.5
+            return minimumSpeed * pow(middleSpeed / minimumSpeed, ratio)
+        }
+        let ratio = (clamped - 0.5) / 0.5
+        return middleSpeed * pow(maximumSpeed / middleSpeed, ratio)
     }
 }
 
@@ -66,12 +79,12 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
     /// which is much slower than an accelerated pointer at ordinary hand speed.
     /// Windows' "Enhance pointer precision off" has a pointer-speed slider; this
     /// is the equivalent. 1.0 = pure physical 1:1.
-    var speedMultiplier: Double = 1.0
+    var speedMultiplier: Double = 1.5
 
     var isLinear: Bool { accelerationAmount <= 0.005 }
     var isNative: Bool { accelerationAmount >= 0.995 }
 
-    init(accelerationAmount: Double = 0.5, speedMultiplier: Double = 1.0) {
+    init(accelerationAmount: Double = 0.5, speedMultiplier: Double = 1.5) {
         self.accelerationAmount = accelerationAmount
         self.speedMultiplier = speedMultiplier
     }
@@ -94,7 +107,7 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
         } else {
             accelerationAmount = 0.5
         }
-        let decodedSpeed = try container.decodeIfPresent(Double.self, forKey: .speedMultiplier) ?? 1.0
+        let decodedSpeed = try container.decodeIfPresent(Double.self, forKey: .speedMultiplier) ?? 1.5
         speedMultiplier = min(max(decodedSpeed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
     }
 

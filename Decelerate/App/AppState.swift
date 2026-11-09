@@ -40,7 +40,6 @@ final class AppState: ObservableObject {
     @Published private(set) var devices: [PointerDevice] = []
     @Published private(set) var status: Status = .idle
     @Published private(set) var lastError: String?
-    @Published private(set) var lastAppliedAt: Date?
     @Published var launchAtLogin: Bool {
         didSet {
             guard !isApplyingExternalChanges else { return }
@@ -203,7 +202,6 @@ final class AppState: ObservableObject {
         } else {
             status = isEnabled ? .active : .idle
         }
-        lastAppliedAt = Date()
     }
 
     func restoreSystemDefaults() {

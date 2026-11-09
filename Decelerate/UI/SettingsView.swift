@@ -58,9 +58,6 @@ private struct GeneralSettingsTab: View {
                 LabeledContent("Devices") {
                     Text(state.connectedDeviceSummary)
                 }
-                LabeledContent("Permissions") {
-                    Text("None required")
-                }
                 LabeledContent("Pointer parameters") {
                     Text(state.systemParameterSummary)
                         .font(.caption.monospacedDigit())
@@ -70,11 +67,6 @@ private struct GeneralSettingsTab: View {
                 }
                 LabeledContent("Version") {
                     Text(state.appVersion)
-                }
-                if let lastAppliedAt = state.lastAppliedAt {
-                    LabeledContent("Last applied") {
-                        Text(lastAppliedAt, format: .dateTime.hour().minute())
-                    }
                 }
             } header: {
                 Text("Pointer")
@@ -196,7 +188,7 @@ private struct AboutSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 DisclosureGroup("How it works", isExpanded: $isShowingHowItWorks) {
-                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% passes raw pointer deltas straight through for exact 1:1 movement, 100% is macOS's own acceleration curve, and intermediate values are a genuine blend of the two. A separate Speed control (0.5×–2×, with 1× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is intentionally slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
+                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% passes raw pointer deltas straight through for exact 1:1 movement, 100% is macOS's own acceleration curve, and intermediate values are a genuine blend of the two. A separate Speed control (0.5×–2×, with 1.5× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is intentionally slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

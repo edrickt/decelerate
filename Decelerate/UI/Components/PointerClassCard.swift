@@ -110,7 +110,7 @@ struct PointerClassCard: View {
                 Slider(value: speedPositionBinding, in: 0...1)
                     .controlSize(.small)
                     .accessibilityLabel("Speed for \(pointerClass.title.lowercased())")
-                    .help("0.5×–2× — 1× in the middle is geometry-true 1:1")
+                    .help("0.5×–2× — 1.5× in the middle; 1× is geometry-true 1:1")
 
                 Text(speedText)
                     .font(.callout)
@@ -122,7 +122,7 @@ struct PointerClassCard: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(accelerationCaption)
-                Text("Speed 0.5×–2× · 1× is true 1:1")
+                Text("Speed 0.5×–2× · 1.5× in the middle")
                     .foregroundStyle(.tertiary)
             }
             .font(.caption)
