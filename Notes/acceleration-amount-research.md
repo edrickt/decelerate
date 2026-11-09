@@ -485,3 +485,29 @@ clear when the slider is at 100 % or the feature is off.
 3. User feel-test of 25/50/75 % on the trackpad; if the high-speed tail approximation is
    noticeable, tune the TSPR lookup (lower error at high v by increasing TSPR further,
    trading normal-range fidelity).
+
+---
+
+## 11. Implementation note — Decelerate 1.1 (Lead)
+
+The shipped app follows §1–§6 for trackpads and any device exposing
+`HIDAccelCurves`: 0% = negative acceleration value (hard 1:1), 1–99% = one
+`UserPointerAccelCurvesKey` write with the blended 10-curve array (so the macOS
+tracking-speed index still selects/ interpolates curves), 100% = empty array
+(native fallback). All coefficients come from the §4 corrected formula
+(`GL' = (1−f)/kCursorScale + f·GL_n`, …) and match
+`Tools/Probe/out/trackpad-accel-amount-table.json` byte-for-byte for f = 0.25
+and 0.5 (verified).
+
+**Table-only mice** use a different, simpler route than the parametric fit
+discussed in §6: the table's own interpolation is linear in the acceleration
+index, so scaling `HIDMouseAcceleration` by the amount is *exactly* the blend
+between identity and full acceleration for the compiled-in 2-entry default
+table. Proof: `CreateWithTable` interpolates point y between the entry at
+accel 0 (identity curve) and the entry at accel 1.0 with ratio = requested
+acceleration; blending that native curve toward identity by f yields the same
+curve as requesting acceleration a·f. This is implemented in
+`AccelerationController.writeScaled` (with a `lastWritten` guard so the scaled
+value is not mistaken for a user change, and originals restored on quit).
+Limitation: not yet tested on external mouse hardware; multi-entry vendor
+tables would give an approximate amount rather than an exact blend.

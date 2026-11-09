@@ -53,6 +53,10 @@ the feature is switched off or the app quits, so macOS is never left patched.
   installs no curve, so the raw device gain applies; adjust it in System
   Settings → Trackpad/Mouse → Tracking speed if you want a different speed.
   Intermediate amounts keep the same tracking speed with a gentler curve.
+- For mice whose acceleration comes from the classic lookup table rather than a
+  parametric curve, the amount is applied by scaling the macOS acceleration
+  index — the table's own linear interpolation between identity and full
+  acceleration.
 - **Scroll acceleration is untouched** — it is a separate HID parameter.
 - **State is self-healing**: Decelerate re-applies if macOS rewrites the
   parameter (for example when you move the Tracking speed slider), after sleep,

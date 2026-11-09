@@ -33,6 +33,7 @@ built-in trackpad — do not use it for the trackpad.
 | `check-state.py` | read-only JSON snapshot: kernel `HIDParameters`, all service mirrors, NSGlobalDomain mouse/trackpad defaults |
 | `filterlog.sh` | read-only: live `IOHIDPointerScrollFilter` decisions from WindowServer logs (ground truth for "did the accelerator change") |
 | `tapmeasure.swift` | CGEventTap delta listener + synthetic-event smoke test (for measuring gain with physical input) |
+| `curve_math.py` | source-exact model of Apple's parametric + table accelerators; generates the continuous-amount blend curves, gain tables and fit/error analysis (`--analysis`, `--mouse`). See `../../Notes/acceleration-amount-research.md` |
 | `TCCProbe/` + `tcc-test.sh` | builds an ad-hoc signed app that never asks for TCC and proves the write works; prints its AX/IM state and the live filter transitions |
 | `out/` | raw evidence from the research session (snapshots, transcripts, logs) |
 
@@ -55,6 +56,12 @@ Danger-free rule: every `param-set` that changes state has a matching read in
 
 - No external mouse was attached during research, so measured per-velocity gain numbers
   require a human to move a pointer while `tapmeasure listen` runs (see the notes §4).
+- Continuous acceleration amount (task-3): install blended curves with
+  `bin/hidprobe set-id <trackpadService> UserPointerAccelCurvesKey 'arrayjson:[...]'`
+  and clear with `emptyarray`; verify via the WindowServer debug log
+  (`table index 0` = user curve in use, `table index 7` = native fallback). Table
+  installation does NOT work from user space (verified). See
+  `Notes/acceleration-amount-research.md`.
 - Synthetic HID injection is impossible locally: `IOHIDUserDeviceCreateWithProperties`
   requires Apple's `com.apple.developer.hid.virtual.device` entitlement and returns NULL.
 - Do not use `defaults write -g com.apple.trackpad.scaling` (no live effect), per-service
