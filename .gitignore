@@ -1,0 +1,22 @@
+# Xcode
+build/
+DerivedData/
+dist/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+
+# SwiftPM
+.build/
+Package.resolved
+
+# Scratch
+Notes/.scratch/
