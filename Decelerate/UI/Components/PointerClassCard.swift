@@ -2,9 +2,11 @@ import SwiftUI
 
 /// One pointer-class control card inside the menu bar panel.
 ///
-/// The slider maps to a real, continuous acceleration amount: 0% is exact 1:1
-/// movement (macOS applies no acceleration curve), 100% is macOS's own curve,
-/// and intermediate values are a genuine blend.
+/// Acceleration is a continuous blend between no acceleration (0%, exact 1:1
+/// movement) and macOS's own curve (100%). Because an unaccelerated pointer is
+/// intentionally slower at normal hand speed, a separate Speed control scales
+/// the 1:1 movement — the Windows pointer-speed slider with "Enhance pointer
+/// precision" off.
 struct PointerClassCard: View {
     let pointerClass: PointerClass
 
@@ -12,6 +14,10 @@ struct PointerClassCard: View {
 
     private var amount: Double {
         state.preferences(for: pointerClass).accelerationAmount
+    }
+
+    private var speed: Double {
+        state.preferences(for: pointerClass).speedMultiplier
     }
 
     private var percent: Int {
@@ -22,10 +28,14 @@ struct PointerClassCard: View {
         amount < 0.995
     }
 
-    private var caption: String {
+    private var speedText: String {
+        String(format: "%.1f×", speed)
+    }
+
+    private var accelerationCaption: String {
         switch percent {
         case 0:
-            return "No acceleration — 1:1 movement, uses your macOS tracking speed"
+            return "No acceleration — 1:1 movement"
         case 100:
             return "macOS default acceleration"
         default:
@@ -66,6 +76,7 @@ struct PointerClassCard: View {
                 Text("None")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .frame(width: 34, alignment: .leading)
                     .accessibilityHidden(true)
 
                 Slider(value: state.binding(for: pointerClass).accelerationAmount, in: 0...1)
@@ -75,14 +86,37 @@ struct PointerClassCard: View {
                 Text("Default")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .frame(width: 44, alignment: .trailing)
                     .accessibilityHidden(true)
             }
 
-            Text(caption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, minHeight: 28, alignment: .topLeading)
+            HStack(spacing: 6) {
+                Text("Speed")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 34, alignment: .leading)
+                    .accessibilityHidden(true)
+
+                Slider(value: state.binding(for: pointerClass).speedMultiplier, in: 0.5...6.0)
+                    .controlSize(.small)
+                    .accessibilityLabel("Speed for \(pointerClass.title.lowercased())")
+                    .help("Scales 1:1 movement — 1.0× is geometry-true, 3.0× is the default")
+
+                Text(speedText)
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+                    .accessibilityHidden(true)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(accelerationCaption)
+                Text("Move faster without acceleration.")
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .topLeading)
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)

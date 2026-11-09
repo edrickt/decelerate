@@ -61,6 +61,10 @@ final class AccelerationController {
     /// for external changes.
     private var lastWritten: [String: Int32] = [:]
     private var isReapplying = false
+    private var isTerminating = false
+    /// While a re-apply is writing parameters, property-change callbacks are
+    /// echoes of our own writes and must not be mistaken for user changes.
+    private var suppressExternalChangesUntil = Date.distantPast
     private var wakeObserver: NSObjectProtocol?
 
     private(set) var lastError: String?
@@ -73,7 +77,51 @@ final class AccelerationController {
         self.parameters = HIDPointerControl()
         self.bridge = HIDServiceBridge()
         self.scanner = HIDDeviceScanner()
-        self.originals = store.loadAccelerationOriginals()
+        // Snapshots written by older/buggy builds can be corrupt (a valid
+        // acceleration value is a curve selector in a known range; a stray
+        // value like 1 selects the identity curve and makes the pointer feel
+        // permanently slow). Validate every entry and derive a sane fallback
+        // from the user's own macOS tracking-speed setting.
+        var loaded = store.loadAccelerationOriginals()
+        for key in Self.managedKeys {
+            if let raw = loaded[key], Self.isPlausibleOriginal(raw) {
+                continue
+            }
+            loaded[key] = Self.trackingSpeedRaw(forKey: key)
+        }
+        self.originals = loaded
+        store.saveAccelerationOriginals(loaded)
+    }
+
+    /// A stored/read acceleration value is a curve selector (IOFixed). The real
+    /// range on macOS spans roughly 0.125…3.0; anything below 0.125 (e.g. the
+    /// corrupt value 1) is not a user setting and must never be written back.
+    private static func isPlausibleOriginal(_ raw: Int32) -> Bool {
+        raw >= 8_192 && raw <= 196_608
+    }
+
+    /// Derives the acceleration value matching the user's macOS tracking-speed
+    /// slider, so "100%" really is their normal macOS feel even if our snapshot
+    /// is missing or was corrupted.
+    private static func trackingSpeedRaw(forKey key: String) -> Int32 {
+        let defaultsKey = key == HIDPropertyKey.trackpadAcceleration
+            ? "com.apple.trackpad.scaling"
+            : "com.apple.mouse.scaling"
+        if let number = UserDefaults.standard.object(forKey: defaultsKey) as? NSNumber {
+            let raw = Int32((number.doubleValue * 65_536.0).rounded())
+            if isPlausibleOriginal(raw) { return raw }
+        }
+        return key == HIDPropertyKey.trackpadAcceleration
+            ? HIDPropertyKey.trackpadFallback
+            : HIDPropertyKey.mouseFallback
+    }
+
+    /// The value to hand back to macOS for a key, guaranteed to be sane.
+    private func originalValue(forKey key: String) -> Int32 {
+        if let raw = originals[key], Self.isPlausibleOriginal(raw) { return raw }
+        let derived = Self.trackingSpeedRaw(forKey: key)
+        originals[key] = derived
+        return derived
     }
 
     // MARK: - Mapping
@@ -138,6 +186,15 @@ final class AccelerationController {
         }
     }
 
+    /// Stop observing, then hand the original parameters back to macOS. Called
+    /// on quit; callbacks that arrive during teardown are ignored so the app
+    /// cannot re-apply settings after restoring them.
+    func prepareForTermination() {
+        isTerminating = true
+        stopMonitoring()
+        restoreSystemState()
+    }
+
     func stopMonitoring() {
         scanner.stopMonitoring()
         if let wakeObserver {
@@ -157,45 +214,52 @@ final class AccelerationController {
             return
         }
         captureOriginalsIfNeeded()
+        suppressExternalChangesUntil = Date().addingTimeInterval(0.75)
 
         let services = bridge.pointerServices()
         var rejected = false
         for pointerClass in PointerClass.allCases {
-            let amount = preferences[pointerClass]?.accelerationAmount ?? Self.nativeAcceleration
+            let category = preferences[pointerClass] ?? CategoryPreferences()
+            let amount = category.accelerationAmount
+            let speed = category.speedMultiplier
             let classServices = services.filter { Self.pointerClass(for: $0) == pointerClass }
             let route = Self.route(for: classServices)
             let keys = Self.parameterKeys(for: pointerClass)
 
             if amount <= Threshold.linear {
-                // No acceleration at all: exact raw passthrough.
-                if !clearOverrides(on: classServices) { rejected = true }
-                for key in keys {
-                    if !write(key, HIDPropertyKey.disabledRaw) { rejected = true }
-                }
-            } else if amount >= Threshold.native {
-                // macOS default: remove overrides and restore the parameter.
-                if !clearOverrides(on: classServices) { rejected = true }
-                for key in keys {
-                    if !write(key, originals[key] ?? Self.fallbackValue(forKey: key)) { rejected = true }
-                }
-            } else {
-                switch route {
-                case .curves:
-                    if !installBlendedCurves(amount, on: classServices) { rejected = true }
-                    if !clearOverrides(on: classServices, except: classServices.map(\.registryID)) { rejected = true }
-                    for key in keys {
-                        if !write(key, originals[key] ?? Self.fallbackValue(forKey: key)) { rejected = true }
-                    }
-                case .indexScaling:
+                // No acceleration: a constant-gain curve. Gain 1.0 is the
+                // physical 1:1 identity, so the speed multiplier is what makes
+                // 1:1 usable at ordinary hand speed (Windows has the same
+                // pointer-speed slider with "enhance pointer precision" off).
+                if !installConstantCurves(speed: speed, on: classServices) { rejected = true }
+            } else if route == .curves {
+                if amount >= Threshold.native, abs(speed - 1.0) < 0.01 {
+                    // Exactly macOS's own curve: hand control back.
                     if !clearOverrides(on: classServices) { rejected = true }
-                    for key in keys {
-                        if !writeScaled(key, amount: amount) { rejected = true }
-                    }
-                case .none:
-                    for key in keys {
-                        if !write(key, originals[key] ?? Self.fallbackValue(forKey: key)) { rejected = true }
-                    }
+                } else {
+                    if !installBlendedCurves(amount, speed: speed, on: classServices) { rejected = true }
+                    if !clearOverrides(on: classServices, except: classServices.map(\.registryID)) { rejected = true }
                 }
+            } else if route == .indexScaling {
+                // Table-only devices (most third-party mice) do not expose
+                // parametric curves; amount is the table's own interpolation
+                // (scale the acceleration index). Speed cannot be scaled there.
+                if !clearOverrides(on: classServices) { rejected = true }
+                if amount >= Threshold.native {
+                    for key in keys { if !write(key, originalValue(forKey: key)) { rejected = true } }
+                    continue
+                }
+                for key in keys { if !writeScaled(key, amount: amount) { rejected = true } }
+                continue
+            } else {
+                // No device of this class is attached: hand the parameters back.
+                if !clearOverrides(on: classServices) { rejected = true }
+                for key in keys { if !write(key, originalValue(forKey: key)) { rejected = true } }
+                continue
+            }
+            // Curves only take effect while acceleration itself is enabled.
+            for key in keys {
+                if !write(key, originalValue(forKey: key)) { rejected = true }
             }
         }
         persistOriginals()
@@ -214,7 +278,7 @@ final class AccelerationController {
         }
         overriddenServices.removeAll()
         for key in Self.managedKeys {
-            if !write(key, originals[key] ?? Self.fallbackValue(forKey: key)) { rejected = true }
+            if !write(key, originalValue(forKey: key)) { rejected = true }
         }
         originals.removeAll()
         lastWritten.removeAll()
@@ -223,7 +287,7 @@ final class AccelerationController {
     }
 
     func reapply() {
-        guard !desired.isEmpty else { return }
+        guard !desired.isEmpty, !isTerminating else { return }
         apply(desired)
     }
 
@@ -239,18 +303,41 @@ final class AccelerationController {
 
     // MARK: - Curve installation
 
-    private func installBlendedCurves(_ amount: Double, on services: [HIDPointerService]) -> Bool {
+    private func installBlendedCurves(
+        _ amount: Double,
+        speed: Double,
+        on services: [HIDPointerService]
+    ) -> Bool {
         guard !services.isEmpty else { return true }
-        var anyInstalled = false
+        var ok = true
         for service in services {
             guard let curves = service.nativeCurves, !curves.isEmpty else { continue }
-            let blended = AccelerationCurveBuilder.blendedCurves(curves, factor: amount)
+            let blended = AccelerationCurveBuilder.curves(curves, factor: amount, speed: speed)
             if bridge.setCurves(blended, on: service.ref) {
                 overriddenServices.insert(service.registryID)
-                anyInstalled = true
+            } else {
+                ok = false
             }
         }
-        return anyInstalled || services.isEmpty
+        return ok
+    }
+
+    /// Installs a pure constant-gain curve (no acceleration) at the chosen
+    /// speed. Works for parametric devices and for table-only devices alike,
+    /// because user curves take priority over both native representations.
+    private func installConstantCurves(speed: Double, on services: [HIDPointerService]) -> Bool {
+        guard !services.isEmpty else { return true }
+        var ok = true
+        for service in services {
+            let source = service.nativeCurves ?? [[HIDCurveKey.index: 0]]
+            let constant = AccelerationCurveBuilder.curves(source, factor: 0, speed: speed)
+            if bridge.setCurves(constant, on: service.ref) {
+                overriddenServices.insert(service.registryID)
+            } else {
+                ok = false
+            }
+        }
+        return ok
     }
 
     /// Removes Decelerate's curve overrides, optionally keeping some services.
@@ -272,6 +359,9 @@ final class AccelerationController {
     @discardableResult
     private func write(_ key: String, _ raw: Int32) -> Bool {
         lastWritten[key] = raw
+        // Avoid churning the HID pipeline when the value is already correct;
+        // curve changes trigger their own rebuild.
+        if parameters.readRaw(key) == raw { return true }
         return parameters.writeRaw(key, raw)
     }
 
@@ -279,8 +369,8 @@ final class AccelerationController {
     /// entry (acceleration index 0) and its full-acceleration entry, so scaling
     /// the index by the amount is exactly "amount of acceleration".
     private func writeScaled(_ key: String, amount: Double) -> Bool {
-        let base = originals[key] ?? Self.fallbackValue(forKey: key)
-        let scaled = max(0, Int32((Double(base) * amount).rounded()))
+        let base = originalValue(forKey: key)
+        let scaled = max(8_192, Int32((Double(base) * amount).rounded()))
         return write(key, scaled)
     }
 
@@ -289,8 +379,7 @@ final class AccelerationController {
     private func captureOriginalsIfNeeded() {
         var captured = false
         for key in Self.managedKeys {
-            guard let raw = parameters.readRaw(key) else { continue }
-            guard raw > 0 else { continue }
+            guard let raw = parameters.readRaw(key), Self.isPlausibleOriginal(raw) else { continue }
             if originals[key] != raw {
                 originals[key] = raw
                 captured = true
@@ -310,12 +399,15 @@ final class AccelerationController {
     // MARK: - External changes
 
     private func systemParameterChanged(_ key: String, _ raw: Int32) {
-        // Our own writes echo back; ignore them.
+        guard !isTerminating else { return }
+        // Our own writes echo back; ignore them (and anything during the
+        // settling window, where macOS may report an equivalent value).
         if lastWritten[key] == raw { return }
+        if Date() < suppressExternalChangesUntil { return }
         guard let pointerClass = Self.pointerClass(forParameterKey: key) else { return }
         guard let amount = desired[pointerClass]?.accelerationAmount,
               amount > Threshold.linear, amount < Threshold.native else { return }
-        if raw > 0 {
+        if Self.isPlausibleOriginal(raw) {
             originals[key] = raw
             persistOriginals()
             // For index-scaled classes, a new base index has to be rescaled.

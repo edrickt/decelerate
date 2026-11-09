@@ -49,10 +49,10 @@ the feature is switched off or the app quits, so macOS is never left patched.
 
 ### Behaviour details
 
-- **Speed** is whatever macOS “Tracking speed” is set to. At 0% the filter
-  installs no curve, so the raw device gain applies; adjust it in System
-  Settings → Trackpad/Mouse → Tracking speed if you want a different speed.
-  Intermediate amounts keep the same tracking speed with a gentler curve.
+- **Speed** is Decelerate's own slider (0.5×–6×). It scales the 1:1 movement
+  directly, so it works with acceleration fully off — that is the Windows
+  "pointer speed" control. macOS's own Tracking speed still influences the
+  shape of the blended macOS curve at 100% and for intermediate amounts.
 - For mice whose acceleration comes from the classic lookup table rather than a
   parametric curve, the amount is applied by scaling the macOS acceleration
   index — the table's own linear interpolation between identity and full

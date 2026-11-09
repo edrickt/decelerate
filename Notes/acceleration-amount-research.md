@@ -511,3 +511,41 @@ curve as requesting acceleration a·f. This is implemented in
 value is not mistaken for a user change, and originals restored on quit).
 Limitation: not yet tested on external mouse hardware; multi-entry vendor
 tables would give an approximate amount rather than an exact blend.
+
+---
+
+## 12. Corrections after 1.2 debugging (Lead)
+
+**The §4 `kCursorScale` correction is wrong, and was reverted in 1.2.** In the
+filter, `IOHIDParametricAcceleration::multiplier()` returns
+`kCursorScale · S(v/deviceScale)` with `deviceScale = resolution/rate`. The
+accelerator then computes `mult = multiplier(velocity)/velocity`, so the output
+ratio for a coefficient set is `kCursorScale · S(v/deviceScale) / velocity`.
+For a pure linear curve `S = GL·v` with `v = velocity/deviceScale` that is
+`kCursorScale · GL / deviceScale = (96/67)·(67/400)·GL = (96/400)·GL`. For a
+400-count-per-inch trackpad on a 96-dpi surface `96/400 = 0.24 points/count` is
+exactly the physical 1:1 conversion, so **`GL = 1.0` is the identity**, not
+`1/kCursorScale`. The ×96/67 and the ×67/400 partially cancel. Using
+`1/kCursorScale` made every low-amount setting ~30% slower than 1:1 (one more
+source of the "really slow" report).
+
+**Snapshot corruption bug (root cause of the v1.1 "slow everywhere" report).**
+The persisted snapshot of the original acceleration values
+(`system.accelerationOriginals`) was written with
+`HIDTrackpadAcceleration = 1` (raw IOFixed `1/65536`, i.e. curve index ≈ 0)
+instead of `131072`. Every apply at amount > 0 therefore restored the identity
+curve, which is flat (no acceleration) — so 100%, 40% and every other amount
+felt identical and slow. 1.2 validates the snapshot (`8192…196608`), discards
+implausible entries, and re-derives them from the macOS Tracking-speed
+preferences (`com.apple.trackpad.scaling` / `com.apple.mouse.scaling`).
+Additional 1.2 hardening: property callbacks are suppressed for 0.75 s after
+our own writes (no echo feedback), a class with no attached devices is never
+index-scaled, and teardown stops observation before restoring parameters.
+
+**Speed control (1.2).** Because macOS's unaccelerated pointer is geometry-true
+1:1 (0.24 points per trackpad count), it feels slow at ordinary hand speed.
+1.2 adds a Speed multiplier that scales the gain curve: coefficients are scaled
+by `s, √s, ∛s, ⁴√s` so `gain'(v) = s·gain(v)`, including at 0 % acceleration
+where the installed curve is a constant `GL = s`. Default 3.0×; range
+0.5×–6.0×. Table-only mice cannot expose a parametric curve, so their Speed
+control is inert (amount still works via the index interpolation).

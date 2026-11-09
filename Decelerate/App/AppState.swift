@@ -93,9 +93,8 @@ final class AppState: ObservableObject {
     /// the next launch.
     func prepareForTermination() {
         DebugLog.write("prepareForTermination: restoring")
-        controller.restoreSystemState()
+        controller.prepareForTermination()
         DebugLog.write("prepareForTermination: restored, error=\(controller.lastError ?? "none")")
-        controller.stopMonitoring()
     }
 
     // MARK: - Derived
@@ -111,16 +110,18 @@ final class AppState: ObservableObject {
     }
 
     var activeSummary: String {
-        let parts: [String] = PointerClass.allCases.map { pointerClass in
-            let amount = preferences(for: pointerClass).accelerationAmount
-            let percent = Int((amount * 100).rounded())
-            if amount <= 0.005 { return "\(pointerClass.title) 1:1" }
-            if amount >= 0.995 { return "\(pointerClass.title) default" }
-            return "\(pointerClass.title) \(percent)%"
-        }
         let values = PointerClass.allCases.map { preferences(for: $0).accelerationAmount }
         if values.allSatisfy({ $0 >= 0.995 }) { return "macOS default acceleration" }
-        if values.allSatisfy({ $0 <= 0.005 }) { return "Trackpad and mouse are 1:1" }
+        let parts: [String] = PointerClass.allCases.map { pointerClass in
+            let category = preferences(for: pointerClass)
+            let percent = Int((category.accelerationAmount * 100).rounded())
+            let speed = category.speedMultiplier
+            let speedText = String(format: "%.1f×", speed)
+            if category.accelerationAmount <= 0.005 {
+                return "\(pointerClass.title) 1:1 · \(speedText)"
+            }
+            return "\(pointerClass.title) \(percent)% · \(speedText)"
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -157,6 +158,14 @@ final class AppState: ObservableObject {
         preferences[pointerClass] = value
         store.save([pointerClass: value])
         reapply()
+    }
+
+    func setSpeedMultiplier(_ speed: Double, for pointerClass: PointerClass) {
+        var value = preferences(for: pointerClass)
+        let clamped = min(max(speed, 0.5), 6)
+        guard value.speedMultiplier != clamped else { return }
+        value.speedMultiplier = clamped
+        setPreferences(value, for: pointerClass)
     }
 
     func setAccelerationAmount(_ amount: Double, for pointerClass: PointerClass) {

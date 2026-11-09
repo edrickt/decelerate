@@ -44,17 +44,26 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
     /// between blend the two natively inside the HID pipeline.
     var accelerationAmount: Double = 0
 
+    /// Pointer speed multiplier for 1:1 movement. macOS's "no acceleration"
+    /// passthrough is a geometry-true 1:1 (one device count per 96-dpi point),
+    /// which is much slower than an accelerated pointer at ordinary hand speed.
+    /// Windows' "Enhance pointer precision off" has a pointer-speed slider; this
+    /// is the equivalent. 1.0 = pure physical 1:1.
+    var speedMultiplier: Double = 3.0
+
     var isLinear: Bool { accelerationAmount <= 0.005 }
     var isNative: Bool { accelerationAmount >= 0.995 }
 
-    init(accelerationAmount: Double = 0) {
+    init(accelerationAmount: Double = 0, speedMultiplier: Double = 3.0) {
         self.accelerationAmount = accelerationAmount
+        self.speedMultiplier = speedMultiplier
     }
 
     // MARK: - Codable (with migration from the original on/off setting)
 
     private enum CodingKeys: String, CodingKey {
         case accelerationAmount
+        case speedMultiplier
         case removeAcceleration
     }
 
@@ -68,10 +77,12 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
         } else {
             accelerationAmount = 0
         }
+        speedMultiplier = try container.decodeIfPresent(Double.self, forKey: .speedMultiplier) ?? 3.0
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(accelerationAmount, forKey: .accelerationAmount)
+        try container.encode(speedMultiplier, forKey: .speedMultiplier)
     }
 }
