@@ -24,6 +24,15 @@ let IOHIDEventSystemClientCreatePtr: IOHIDEventSystemClientCreateFn? = {
     return unsafeBitCast(sym, to: IOHIDEventSystemClientCreateFn.self)
 }()
 
+typealias IOHIDEventSystemClientCopyServiceForRegistryIDFn =
+    @convention(c) (IOHIDEventSystemClient?, UInt64) -> IOHIDServiceClient?
+let IOHIDEventSystemClientCopyServiceForRegistryIDPtr:
+    IOHIDEventSystemClientCopyServiceForRegistryIDFn? = {
+    guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
+                          "IOHIDEventSystemClientCopyServiceForRegistryID") else { return nil }
+    return unsafeBitCast(sym, to: IOHIDEventSystemClientCopyServiceForRegistryIDFn.self)
+}()
+
 // MARK: - Helpers
 
 func services(of client: IOHIDEventSystemClient) -> [IOHIDServiceClient] {
@@ -133,6 +142,21 @@ func clients() -> [(String, IOHIDEventSystemClient)] {
     return out
 }
 
+func serviceForRegistryID(_ id: UInt64) -> IOHIDServiceClient? {
+    if let create = IOHIDEventSystemClientCreatePtr,
+       let client = create(kCFAllocatorDefault),
+       let copy = IOHIDEventSystemClientCopyServiceForRegistryIDPtr,
+       let svc = copy(client, id) {
+        return svc
+    }
+    let simple = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+    if let copy = IOHIDEventSystemClientCopyServiceForRegistryIDPtr,
+       let svc = copy(simple, id) {
+        return svc
+    }
+    return nil
+}
+
 let pointerKeys: [String] = [
     "Product", "Transport", "Built-In", "PrimaryUsagePage", "PrimaryUsage",
     "HIDPointerAcceleration", "HIDPointerAccelerationType", "HIDPointerAccelerationTable",
@@ -216,7 +240,12 @@ func cmdSet(selector: String, key: String, valueString: String) {
             case "mouse": match = k == .mouse
             case "trackpad": match = k == .trackpad
             default:
-                match = selector.hasPrefix("id:") && UInt64(selector.dropFirst(3)) == id
+                if selector.hasPrefix("id:") {
+                let hex = selector.dropFirst(3).replacingOccurrences(of: "0x", with: "")
+                match = UInt64(hex, radix: 16) == id
+            } else {
+                match = false
+            }
             }
             if !match { continue }
             matched += 1
@@ -248,6 +277,155 @@ func cmdAccess() {
     if let tap { CFMachPortInvalidate(tap) }
 }
 
+func cmdSetSimple(_ id: UInt64, key: String, valueString: String) {
+    guard let value = makeValue(valueString) else { print("bad value"); return }
+    let simple = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+    let svcs = services(of: simple)
+    guard let svc = svcs.first(where: { registryID($0) == id }) else {
+        print("SimpleClient: no service for id 0x\(String(id, radix: 16))"); return
+    }
+    let before = describe(get(svc, key))
+    let ok = IOHIDServiceClientSetProperty(svc, key as CFString, value)
+    print("SimpleClient id=0x\(String(id, radix: 16)) product=\"\(getString(svc, "Product") ?? "?")\"")
+    print("   set \(key)=\(valueString) -> returned \(ok)  before=\(before)  after=\(describe(get(svc, key)))")
+}
+
+func cmdGetSimple(_ id: UInt64, key: String) {
+    let simple = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+    let svcs = services(of: simple)
+    guard let svc = svcs.first(where: { registryID($0) == id }) else {
+        print("SimpleClient: no service for id 0x\(String(id, radix: 16))"); return
+    }
+    print("SimpleClient id=0x\(String(id, radix: 16)) \(key) = \(describe(get(svc, key)))")
+}
+
+// MARK: - IOHIDSystem parameter connection (classic public/deprecated API)
+// IORegistryEntryFromPath("IOService:/IOResources/IOHIDSystem") + IOServiceOpen(kIOHIDParamConnectType=1)
+// then IOHIDCopyCFTypeParameter / IOHIDSetCFTypeParameter / IOHIDSetAccelerationWithKey.
+
+func openHIDParam() -> io_connect_t? {
+    let service = IORegistryEntryFromPath(kIOMainPortDefault, "IOService:/IOResources/IOHIDSystem")
+    guard service != 0 else { print("IOHIDSystem service not found"); return nil }
+    defer { IOObjectRelease(service) }
+    var handle: io_connect_t = 0
+    let kr = IOServiceOpen(service, mach_task_self_, 1 /* kIOHIDParamConnectType */, &handle)
+    guard kr == KERN_SUCCESS else { print("IOServiceOpen(param) failed: 0x\(String(kr, radix: 16))"); return nil }
+    return handle
+}
+
+func copyParam(_ handle: io_connect_t, _ key: String) -> (kern_return_t, CFTypeRef?) {
+    var out: Unmanaged<CFTypeRef>?
+    let kr = IOHIDCopyCFTypeParameter(handle, key as CFString, &out)
+    return (kr, out?.takeRetainedValue())
+}
+
+func cmdParamGet(_ key: String) {
+    guard let handle = openHIDParam() else { return }
+    defer { IOServiceClose(handle) }
+    let (kr, value) = copyParam(handle, key)
+    print("param-get \(key): kr=0x\(String(kr, radix: 16)) value=\(describe(value))")
+}
+
+func cmdParamSet(_ key: String, _ valueString: String) {
+    guard let handle = openHIDParam() else { return }
+    defer { IOServiceClose(handle) }
+    guard let value = makeValue(valueString) else { print("bad value"); return }
+    let (_, before) = copyParam(handle, key)
+    let kr = IOHIDSetCFTypeParameter(handle, key as CFString, value)
+    let (_, after) = copyParam(handle, key)
+    print("param-set \(key)=\(valueString): kr=0x\(String(kr, radix: 16))")
+    print("   before=\(describe(before))")
+    print("   after =\(describe(after))")
+}
+
+func cmdParamSetAccel(_ key: String, _ doubleString: String) {
+    guard let handle = openHIDParam() else { return }
+    defer { IOServiceClose(handle) }
+    let value = Double(doubleString) ?? 0
+    let kr = IOHIDSetAccelerationWithKey(handle, key as CFString, value)
+    let (_, after) = copyParam(handle, key)
+    print("param-setaccel \(key)=\(value): kr=0x\(String(kr, radix: 16)) after=\(describe(after))")
+}
+
+func cmdParamDump() {
+    guard let handle = openHIDParam() else { return }
+    defer { IOServiceClose(handle) }
+    for key in ["HIDTrackpadAcceleration", "HIDMouseAcceleration", "HIDPointerAcceleration",
+                "HIDUseLinearScalingMouseAcceleration", "HIDScrollAcceleration",
+                "HIDTrackpadScrollAcceleration", "HIDMouseScrollAcceleration"] {
+        let (kr, out) = copyParam(handle, key)
+        print("  param \(key): kr=0x\(String(kr, radix: 16)) = \(describe(out))")
+    }
+}
+
+func cmdSetSystem(_ key: String, _ valueString: String) {
+    guard let value = makeValue(valueString) else { print("bad value"); return }
+    for (label, client) in clients() {
+        let before = describe(IOHIDEventSystemClientCopyProperty(client, key as CFString))
+        let ok = IOHIDEventSystemClientSetProperty(client, key as CFString, value)
+        let after = describe(IOHIDEventSystemClientCopyProperty(client, key as CFString))
+        print("\(label): SetProperty(\(key)=\(valueString)) -> \(ok); before=\(before); after=\(after)")
+    }
+}
+
+func cmdGetSystem(_ key: String) {
+    for (label, client) in clients() {
+        print("\(label): \(key) = \(describe(IOHIDEventSystemClientCopyProperty(client, key as CFString)))")
+    }
+}
+
+func cmdDumpID(_ id: UInt64) {
+    guard let svc = serviceForRegistryID(id) else {
+        print("no service client for registry id 0x\(String(id, radix: 16))")
+        return
+    }
+    print("-- by-registry service id=0x\(String(id, radix: 16)) kind=\(kind(svc).rawValue) product=\"\(getString(svc, "Product") ?? "?")\" --")
+    print("   conforms: GD/Mouse=\(IOHIDServiceClientConformsTo(svc, 0x01, 0x02)) Digitizer/TouchPad=\(IOHIDServiceClientConformsTo(svc, 0x0D, 0x05)) GD/Keyboard=\(IOHIDServiceClientConformsTo(svc, 0x01, 0x06))")
+    dumpRegistryProperties(id: id)
+    for key in pointerKeys {
+        print("   prop \(key) = \(describe(get(svc, key)))")
+    }
+}
+
+func cmdSetID(_ id: UInt64, key: String, valueString: String) {
+    guard let value = makeValue(valueString) else { print("bad value"); return }
+    guard let svc = serviceForRegistryID(id) else {
+        print("no service client for registry id 0x\(String(id, radix: 16))")
+        return
+    }
+    let before = describe(get(svc, key))
+    let ok = IOHIDServiceClientSetProperty(svc, key as CFString, value)
+    let after = describe(get(svc, key))
+    print("id=0x\(String(id, radix: 16)) kind=\(kind(svc).rawValue) product=\"\(getString(svc, "Product") ?? "?")\" (by-registry)")
+    print("   set \(key)=\(valueString) -> returned \(ok)")
+    print("   before=\(before)")
+    print("   after =\(after)")
+}
+
+func registryClass(_ id: UInt64) -> String {
+    guard let matching = IORegistryEntryIDMatching(id) else { return "?" }
+    let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+    guard service != 0 else { return "not-in-registry" }
+    defer { IOObjectRelease(service) }
+    var buf = [CChar](repeating: 0, count: 128)
+    IOObjectGetClass(service, &buf)
+    return String(cString: buf)
+}
+
+func cmdMap() {
+    for (label, client) in clients() {
+        if label.hasPrefix("Full") { continue }
+        print("=== \(label) ===")
+        for svc in services(of: client) {
+            let id = registryID(svc) ?? 0
+            print(String(format: "id=0x%llx kind=%@ registryClass=%@ product=\"%@\" accelType=%@",
+                         id, kind(svc).rawValue, registryClass(id),
+                         getString(svc, "Product") ?? "?",
+                         getString(svc, "HIDPointerAccelerationType") ?? "-"))
+        }
+    }
+}
+
 func usage() {
     print("""
     usage: hidprobe <command> [args]
@@ -255,6 +433,14 @@ func usage() {
       dump [--pointer-only] [--no-registry]
       get <key>
       set <all|mouse|trackpad|id:0x...> <key> <value>   value: int:N | fixed:D | bool:true | str:S | data:hex
+      dump-id <0xREGISTRYID>
+      set-id <0xREGISTRYID> <key> <value>
+      set-simple <0xREGISTRYID> <key> <value>
+      set-system <key> <value>
+      param-dump | param-get <key> | param-set <key> <value> | param-setaccel <key> <double>
+      get-system <key>
+      get-simple <0xREGISTRYID> <key>
+      map
       access
     """)
 }
@@ -273,6 +459,35 @@ case "get":
 case "set":
     guard args.count >= 5 else { usage(); exit(1) }
     cmdSet(selector: args[2], key: args[3], valueString: args[4])
+case "param-get":
+    guard args.count >= 3 else { usage(); exit(1) }
+    cmdParamGet(args[2])
+case "param-set":
+    guard args.count >= 4 else { usage(); exit(1) }
+    cmdParamSet(args[2], args[3])
+case "param-setaccel":
+    guard args.count >= 4 else { usage(); exit(1) }
+    cmdParamSetAccel(args[2], args[3])
+case "param-dump": cmdParamDump()
+case "set-system":
+    guard args.count >= 4 else { usage(); exit(1) }
+    cmdSetSystem(args[2], args[3])
+case "get-system":
+    guard args.count >= 3 else { usage(); exit(1) }
+    cmdGetSystem(args[2])
+case "set-simple":
+    guard args.count >= 5, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdSetSimple(id, key: args[3], valueString: args[4])
+case "get-simple":
+    guard args.count >= 4, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdGetSimple(id, key: args[3])
+case "dump-id":
+    guard args.count >= 3, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdDumpID(id)
+case "set-id":
+    guard args.count >= 5, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdSetID(id, key: args[3], valueString: args[4])
+case "map": cmdMap()
 case "access": cmdAccess()
 default: usage(); exit(1)
 }

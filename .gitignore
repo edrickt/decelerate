@@ -20,3 +20,8 @@ Package.resolved
 
 # Scratch
 Notes/.scratch/
+
+# Local build/QA artifacts
+build-ui/
+Tools/Probe/bin/
+Tools/Probe/out/

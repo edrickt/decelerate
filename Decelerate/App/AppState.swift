@@ -13,14 +13,12 @@ final class AppState: ObservableObject {
     enum Status: Equatable {
         case idle
         case active
-        case needsPermission
         case failed(String)
 
         var title: String {
             switch self {
             case .idle: return "Off"
             case .active: return "1:1 Pointer"
-            case .needsPermission: return "Needs Permission"
             case .failed: return "Error"
             }
         }
@@ -29,7 +27,6 @@ final class AppState: ObservableObject {
             switch self {
             case .idle: return "cursorarrow"
             case .active: return "cursorarrow.motionlines"
-            case .needsPermission: return "exclamationmark.triangle.fill"
             case .failed: return "xmark.octagon.fill"
             }
         }
@@ -42,8 +39,8 @@ final class AppState: ObservableObject {
     @Published private(set) var preferences: [PointerClass: CategoryPreferences]
     @Published private(set) var devices: [PointerDevice] = []
     @Published private(set) var status: Status = .idle
-    @Published private(set) var needsPermission = false
     @Published private(set) var lastError: String?
+    @Published private(set) var lastAppliedAt: Date?
     @Published var launchAtLogin: Bool {
         didSet {
             guard !isApplyingExternalChanges else { return }
@@ -57,9 +54,6 @@ final class AppState: ObservableObject {
             store.showDockIcon = showDockIcon
         }
     }
-
-    /// Shown as a transient "Applied" confirmation in the UI.
-    @Published private(set) var lastAppliedAt: Date?
 
     // MARK: - Dependencies
 
@@ -93,10 +87,14 @@ final class AppState: ObservableObject {
         syncLaunchAtLoginFromSystem()
     }
 
-    /// Called from applicationWillTerminate. System settings are intentionally
-    /// left in place (like a real system preference), so relaunching resumes
-    /// the same state.
-    func shutdown() {
+    /// Called from applicationWillTerminate: hands the pointer acceleration back
+    /// to macOS exactly as it was before Decelerate, so quitting the app never
+    /// leaves the system in a patched state. The user's switches are kept for
+    /// the next launch.
+    func prepareForTermination() {
+        DebugLog.write("prepareForTermination: restoring")
+        controller.restoreSystemState()
+        DebugLog.write("prepareForTermination: restored, error=\(controller.lastError ?? "none")")
         controller.stopMonitoring()
     }
 
@@ -107,7 +105,7 @@ final class AppState: ObservableObject {
     }
 
     var connectedDeviceSummary: String {
-        if devices.isEmpty { return "No pointing devices detected" }
+        if devices.isEmpty { return "No pointing device detected" }
         if devices.count == 1 { return "1 device connected" }
         return "\(devices.count) devices connected"
     }
@@ -122,15 +120,18 @@ final class AppState: ObservableObject {
     }
 
     var menuBarSymbol: String {
-        preferences[.mouse]?.removeAcceleration == true || preferences[.trackpad]?.removeAcceleration == true
-            ? "cursorarrow.motionlines"
-            : "cursorarrow"
+        isEnabled ? "cursorarrow.motionlines" : "cursorarrow"
     }
 
     var appVersion: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
         return "\(version) (\(build))"
+    }
+
+    /// Live description of the system parameters, e.g. for the General tab.
+    var systemParameterSummary: String {
+        controller.parameterSummary
     }
 
     // MARK: - Preferences
@@ -155,22 +156,18 @@ final class AppState: ObservableObject {
 
     func setRemoveAcceleration(_ remove: Bool, for pointerClass: PointerClass) {
         var value = preferences(for: pointerClass)
+        guard value.removeAcceleration != remove else { return }
         value.removeAcceleration = remove
         setPreferences(value, for: pointerClass)
     }
 
-    func setSensitivity(_ sensitivity: Double, for pointerClass: PointerClass) {
-        var value = preferences(for: pointerClass)
-        value.sensitivity = min(max(sensitivity, 0), 1)
-        setPreferences(value, for: pointerClass)
-    }
-
-    /// Master switch: turns both classes on or off.
+    /// Master switch: every pointer class on or off.
     func setEnabled(_ enabled: Bool) {
         var updated = preferences
         for pointerClass in PointerClass.allCases {
             updated[pointerClass]?.removeAcceleration = enabled
         }
+        guard updated != preferences else { return }
         preferences = updated
         store.save(updated)
         reapply()
@@ -180,41 +177,27 @@ final class AppState: ObservableObject {
 
     func refreshDevices() {
         devices = controller.connectedDevices()
-        needsPermission = controller.needsPermission
     }
 
     func reapply() {
-        controller.refreshPermissionStatus()
         controller.apply(preferences)
-        needsPermission = controller.needsPermission
         lastError = controller.lastError
-        switch (isEnabled, needsPermission, lastError) {
-        case (false, _, _):
-            status = .idle
-        case (true, true, _):
-            status = .needsPermission
-        case (true, false, .some(let error)):
+        if let error = lastError {
             status = .failed(error)
-        case (true, false, nil):
-            status = .active
+        } else {
+            status = isEnabled ? .active : .idle
         }
         lastAppliedAt = Date()
     }
 
     func restoreSystemDefaults() {
-        controller.restoreSystemDefaults()
+        controller.restoreSystemState()
         var updated = preferences
         for pointerClass in PointerClass.allCases {
             updated[pointerClass]?.removeAcceleration = false
         }
         preferences = updated
         store.save(updated)
-        reapply()
-    }
-
-    func requestPermission() {
-        _ = controller.requestPermissionIfNeeded()
-        refreshDevices()
         reapply()
     }
 

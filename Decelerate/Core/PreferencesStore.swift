@@ -13,7 +13,7 @@ struct PreferencesStore {
         static let launchAtLogin = "general.launchAtLogin"
         static let showDockIcon = "general.showDockIcon"
         static let onboardingDone = "general.onboardingDone"
-        static let originalSystemState = "system.originalState"
+        static let accelerationOriginals = "system.accelerationOriginals"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -48,20 +48,23 @@ struct PreferencesStore {
         nonmutating set { defaults.set(newValue, forKey: Key.onboardingDone) }
     }
 
-    // MARK: - Snapshot of the user's original system settings, so Decelerate
-    // can restore them when switched off or uninstalled.
+    // MARK: - Snapshot of the user's original HID parameters, so Decelerate can
+    // put the Mac back exactly as it was — including after a crash, because the
+    // snapshot survives relaunch.
 
-    func saveOriginalSystemState(_ state: OriginalSystemState) {
-        encode(state, forKey: Key.originalSystemState)
+    func saveAccelerationOriginals(_ values: [String: Int32]) {
+        encode(values, forKey: Key.accelerationOriginals)
     }
 
-    func loadOriginalSystemState() -> OriginalSystemState? {
-        decode(Key.originalSystemState)
+    func loadAccelerationOriginals() -> [String: Int32] {
+        decode(Key.accelerationOriginals) ?? [:]
     }
 
-    func clearOriginalSystemState() {
-        defaults.removeObject(forKey: Key.originalSystemState)
+    func clearAccelerationOriginals() {
+        defaults.removeObject(forKey: Key.accelerationOriginals)
     }
+
+    // MARK: - Helpers
 
     private func key(for pointerClass: PointerClass) -> String {
         switch pointerClass {
@@ -79,12 +82,4 @@ struct PreferencesStore {
         guard let data = defaults.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
-}
-
-/// A snapshot of the acceleration-relevant system state taken the first time
-/// Decelerate changes anything, so we can put the Mac back exactly as it was.
-struct OriginalSystemState: Codable, Equatable {
-    var mouseScaling: Double?
-    var trackpadScaling: Double?
-    var capturedAt: Date
 }
