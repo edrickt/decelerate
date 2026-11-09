@@ -1,12 +1,13 @@
 # Decelerate
 
-A tiny native macOS menu bar app that **removes pointer acceleration** for the
-built-in trackpad and for mice, so the pointer moves **1:1** with your hand —
-the same feel as Windows with **“Enhance pointer precision” turned off**.
+A tiny native macOS menu bar app that **tames pointer acceleration** for the
+built-in trackpad and for mice. At 0% the pointer moves **1:1** with your hand —
+the same feel as Windows with **“Enhance pointer precision” turned off** — and
+you can dial acceleration back in from 0% to macOS's own curve.
 
 No event interception, no kernel extensions, no accessibility permissions, no
-latency. Decelerate asks macOS's HID event system to stop applying its
-acceleration curve; the system then passes raw pointer deltas straight through.
+latency. Decelerate works inside macOS's HID event system: it either removes the
+acceleration curve entirely or feeds the system a blended one.
 
 ![Decelerate menu bar panel](docs/panel.png)
 
@@ -36,21 +37,28 @@ connection (`IOServiceOpen(…, kIOHIDParamConnectType, …)` +
 settings. It needs no root, no entitlements and no TCC permission, and it adds
 zero overhead to the input path because nothing is intercepted.
 
+For amounts between 0% and 100%, Decelerate delivers the HID filter a **blended
+acceleration curve** derived from the device's own macOS curve (gain(v) is
+interpolated toward 1.0), which the filter caches per pointer service. Devices
+whose acceleration comes from a classic lookup table (most third-party mice)
+instead use the table's built-in linear interpolation by scaling the
+acceleration index — again with no interception.
+
 The original values are snapshotted before the first write and restored when
 the feature is switched off or the app quits, so macOS is never left patched.
 
 ### Behaviour details
 
-- **Speed** is whatever macOS “Tracking speed” is set to. In 1:1 mode the filter
+- **Speed** is whatever macOS “Tracking speed” is set to. At 0% the filter
   installs no curve, so the raw device gain applies; adjust it in System
   Settings → Trackpad/Mouse → Tracking speed if you want a different speed.
+  Intermediate amounts keep the same tracking speed with a gentler curve.
 - **Scroll acceleration is untouched** — it is a separate HID parameter.
 - **State is self-healing**: Decelerate re-applies if macOS rewrites the
   parameter (for example when you move the Tracking speed slider), after sleep,
   and when a device is attached.
-- **Quitting restores acceleration.** Acceleration is removed only while
-  Decelerate is running; the menu bar icon appears in the system menu bar when
-  it is.
+- **Quitting restores macOS.** Any override is removed only while Decelerate is
+  running; the menu bar icon appears in the system menu bar when it is.
 - A crash cannot leave the Mac permanently patched: the original values are
   persisted, and the next launch re-applies or restores correctly. Even without
   a snapshot, values reset at logout/reboot.

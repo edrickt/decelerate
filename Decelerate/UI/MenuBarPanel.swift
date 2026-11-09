@@ -67,7 +67,7 @@ struct MenuBarPanel: View {
 
             Spacer(minLength: 4)
 
-            StatusBadge(status: state.status)
+            StatusBadge(status: state.status, label: state.statusPillLabel)
         }
     }
 

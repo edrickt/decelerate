@@ -50,7 +50,7 @@ private struct GeneralSettingsTab: View {
 
             Section {
                 LabeledContent("Status") {
-                    StatusBadge(status: state.status)
+                    StatusBadge(status: state.status, label: state.statusPillLabel)
                 }
                 LabeledContent("Mode") {
                     Text(state.activeSummary)
@@ -95,7 +95,7 @@ private struct GeneralSettingsTab: View {
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("Decelerate will turn off 1:1 movement and put your Mac's pointer settings back the way they were before Decelerate started.")
+                    Text("Decelerate will return pointer acceleration to the macOS default and put your Mac's pointer settings back the way they were before Decelerate started.")
                 }
             } footer: {
                 Text("Use this to return to the system's standard pointer acceleration.")
@@ -196,7 +196,7 @@ private struct AboutSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 DisclosureGroup("How it works", isExpanded: $isShowingHowItWorks) {
-                    Text("Decelerate asks macOS's HID event system to stop applying its pointer acceleration curve. The system then passes raw pointer deltas straight through, so movement is 1:1, like Windows with Enhance pointer precision off. No events are intercepted or synthesized, no access is requested, and quitting Decelerate restores the original setting.")
+                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% passes raw pointer deltas straight through for exact 1:1 movement, 100% is macOS's own acceleration curve, and intermediate values are a genuine blend of the two. No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -5,7 +5,7 @@ import SwiftUI
 ///
 /// macOS keeps separate acceleration parameters for trackpads and mice
 /// (`HIDTrackpadAcceleration` / `HIDMouseAcceleration`), so the app exposes one
-/// switch per class.
+/// slider per class.
 enum PointerClass: String, CaseIterable, Codable, Identifiable, Hashable {
     case trackpad
     case mouse
@@ -36,8 +36,42 @@ enum PointerClass: String, CaseIterable, Codable, Identifiable, Hashable {
 
 /// User-facing settings for one pointer class.
 struct CategoryPreferences: Codable, Equatable, Hashable {
-    /// When true, macOS's acceleration curve is replaced with a 1:1 mapping: a
-    /// given physical movement always moves the pointer the same number of
-    /// points, regardless of speed (Windows "Enhance pointer precision" off).
-    var removeAcceleration: Bool = true
+    /// How much of macOS's pointer acceleration to apply.
+    ///
+    /// 0 = no acceleration at all: a given physical movement always moves the
+    /// pointer the same distance (1:1, like Windows with "Enhance pointer
+    /// precision" off). 1 = exactly macOS's own acceleration curve. Values in
+    /// between blend the two natively inside the HID pipeline.
+    var accelerationAmount: Double = 0
+
+    var isLinear: Bool { accelerationAmount <= 0.005 }
+    var isNative: Bool { accelerationAmount >= 0.995 }
+
+    init(accelerationAmount: Double = 0) {
+        self.accelerationAmount = accelerationAmount
+    }
+
+    // MARK: - Codable (with migration from the original on/off setting)
+
+    private enum CodingKeys: String, CodingKey {
+        case accelerationAmount
+        case removeAcceleration
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let amount = try container.decodeIfPresent(Double.self, forKey: .accelerationAmount) {
+            accelerationAmount = amount
+        } else if let removed = try container.decodeIfPresent(Bool.self, forKey: .removeAcceleration) {
+            // Version 1.0 stored a boolean; true meant "fully linear".
+            accelerationAmount = removed ? 0 : 1
+        } else {
+            accelerationAmount = 0
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accelerationAmount, forKey: .accelerationAmount)
+    }
 }

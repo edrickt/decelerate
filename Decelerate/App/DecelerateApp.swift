@@ -2,13 +2,6 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-enum DebugLog {
-    static func write(_ message: String) {
-        guard ProcessInfo.processInfo.environment["DECELERATE_DEBUG"] == "1" else { return }
-        FileHandle.standardError.write(Data("[Decelerate] \(message)\n".utf8))
-    }
-}
-
 @main
 struct DecelerateApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate

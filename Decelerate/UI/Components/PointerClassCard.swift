@@ -2,22 +2,35 @@ import SwiftUI
 
 /// One pointer-class control card inside the menu bar panel.
 ///
-/// Removing acceleration is all-or-nothing in the HID layer: the system passes
-/// raw pointer deltas through and speed follows the Mac's own tracking-speed
-/// setting, so there is no separate sensitivity control.
+/// The slider maps to a real, continuous acceleration amount: 0% is exact 1:1
+/// movement (macOS applies no acceleration curve), 100% is macOS's own curve,
+/// and intermediate values are a genuine blend.
 struct PointerClassCard: View {
     let pointerClass: PointerClass
 
     @EnvironmentObject private var state: AppState
 
-    private var isRemovingAcceleration: Bool {
-        state.preferences(for: pointerClass).removeAcceleration
+    private var amount: Double {
+        state.preferences(for: pointerClass).accelerationAmount
+    }
+
+    private var percent: Int {
+        Int((amount * 100).rounded())
+    }
+
+    private var isReduced: Bool {
+        amount < 0.995
     }
 
     private var caption: String {
-        isRemovingAcceleration
-            ? "1:1 movement, uses your macOS tracking speed"
-            : "macOS pointer acceleration is active"
+        switch percent {
+        case 0:
+            return "No acceleration — 1:1 movement, uses your macOS tracking speed"
+        case 100:
+            return "macOS default acceleration"
+        default:
+            return "Blended acceleration (\(percent)%)"
+        }
     }
 
     var body: some View {
@@ -25,7 +38,7 @@ struct PointerClassCard: View {
             HStack(spacing: 9) {
                 Image(systemName: pointerClass.systemImage)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(isRemovingAcceleration ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(isReduced ? Color.accentColor : Color.secondary)
                     .frame(width: 22, height: 22)
                     .accessibilityHidden(true)
 
@@ -39,27 +52,37 @@ struct PointerClassCard: View {
                         .lineLimit(1)
                 }
 
-                Spacer(minLength: 0)
-            }
-
-            HStack(spacing: 8) {
-                Text("Remove acceleration")
-                    .font(.callout)
-
                 Spacer(minLength: 8)
 
-                Toggle("Remove acceleration for \(pointerClass.title.lowercased())",
-                       isOn: state.binding(for: pointerClass).removeAcceleration)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
+                Text("\(percent)%")
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40, alignment: .trailing)
+                    .accessibilityHidden(true)
+            }
+
+            HStack(spacing: 6) {
+                Text("None")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+
+                Slider(value: state.binding(for: pointerClass).accelerationAmount, in: 0...1)
                     .controlSize(.small)
-                    .help("Replace macOS acceleration with 1:1 pointer movement")
+                    .accessibilityLabel("Acceleration for \(pointerClass.title.lowercased())")
+
+                Text("Default")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
 
             Text(caption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .topLeading)
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)

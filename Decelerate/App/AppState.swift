@@ -101,7 +101,7 @@ final class AppState: ObservableObject {
     // MARK: - Derived
 
     var isEnabled: Bool {
-        preferences.values.contains { $0.removeAcceleration }
+        preferences.values.contains { !$0.isNative }
     }
 
     var connectedDeviceSummary: String {
@@ -111,12 +111,17 @@ final class AppState: ObservableObject {
     }
 
     var activeSummary: String {
-        let enabled = PointerClass.allCases.filter { preferences[$0]?.removeAcceleration == true }
-        switch enabled.count {
-        case 0: return "Acceleration on, macOS default feel"
-        case PointerClass.allCases.count: return "Trackpad and mouse are 1:1"
-        default: return "\(enabled[0].title) is 1:1"
+        let parts: [String] = PointerClass.allCases.map { pointerClass in
+            let amount = preferences(for: pointerClass).accelerationAmount
+            let percent = Int((amount * 100).rounded())
+            if amount <= 0.005 { return "\(pointerClass.title) 1:1" }
+            if amount >= 0.995 { return "\(pointerClass.title) default" }
+            return "\(pointerClass.title) \(percent)%"
         }
+        let values = PointerClass.allCases.map { preferences(for: $0).accelerationAmount }
+        if values.allSatisfy({ $0 >= 0.995 }) { return "macOS default acceleration" }
+        if values.allSatisfy({ $0 <= 0.005 }) { return "Trackpad and mouse are 1:1" }
+        return parts.joined(separator: " · ")
     }
 
     var menuBarSymbol: String {
@@ -154,18 +159,20 @@ final class AppState: ObservableObject {
         reapply()
     }
 
-    func setRemoveAcceleration(_ remove: Bool, for pointerClass: PointerClass) {
+    func setAccelerationAmount(_ amount: Double, for pointerClass: PointerClass) {
         var value = preferences(for: pointerClass)
-        guard value.removeAcceleration != remove else { return }
-        value.removeAcceleration = remove
+        let clamped = min(max(amount, 0), 1)
+        guard value.accelerationAmount != clamped else { return }
+        value.accelerationAmount = clamped
         setPreferences(value, for: pointerClass)
     }
 
-    /// Master switch: every pointer class on or off.
-    func setEnabled(_ enabled: Bool) {
+    /// Sets every pointer class to the same acceleration amount.
+    func setAccelerationAmountForAll(_ amount: Double) {
         var updated = preferences
+        let clamped = min(max(amount, 0), 1)
         for pointerClass in PointerClass.allCases {
-            updated[pointerClass]?.removeAcceleration = enabled
+            updated[pointerClass]?.accelerationAmount = clamped
         }
         guard updated != preferences else { return }
         preferences = updated
@@ -194,7 +201,7 @@ final class AppState: ObservableObject {
         controller.restoreSystemState()
         var updated = preferences
         for pointerClass in PointerClass.allCases {
-            updated[pointerClass]?.removeAcceleration = false
+            updated[pointerClass]?.accelerationAmount = AccelerationController.nativeAcceleration
         }
         preferences = updated
         store.save(updated)

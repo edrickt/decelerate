@@ -203,6 +203,23 @@ func cmdGet(key: String) {
 
 // value syntax: int:<n> | fixed:<double> | bool:<true|false> | str:<s> | data:<hex>
 func makeValue(_ s: String) -> AnyObject? {
+    if s == "emptyarray" { return NSArray() }
+    if s.hasPrefix("arrayjson:") {
+        let json = String(s.dropFirst(10))
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        func convert(_ v: Any) -> Any {
+            if let n = v as? NSNumber { return n }
+            if let a = v as? [Any] { return a.map(convert) }
+            if let d = v as? [String: Any] {
+                var out: [String: Any] = [:]
+                for (k, vv) in d { out[k] = convert(vv) }
+                return out
+            }
+            return v
+        }
+        return convert(obj) as AnyObject
+    }
     if s.hasPrefix("int:") { return NSNumber(value: Int64(s.dropFirst(4)) ?? 0) }
     if s.hasPrefix("fixed:") {
         let d = Double(s.dropFirst(6)) ?? 0
@@ -275,6 +292,46 @@ func cmdAccess() {
                                 userInfo: nil)
     print("CGEventTapCreate(.cghidEventTap, .listenOnly, mouseMoved) = \(tap != nil ? "OK" : "NIL (no TCC)")")
     if let tap { CFMachPortInvalidate(tap) }
+}
+
+func cmdGetByID(_ id: UInt64, key: String, raw: Bool = false) {
+    guard let svc = serviceForRegistryID(id) else {
+        print("no service client for registry id 0x\(String(id, radix: 16))"); return
+    }
+    print("full-client id=0x\(String(id, radix: 16)) product=\"\(getString(svc, "Product") ?? "?")\"")
+    if raw, let v = get(svc, key) {
+        print("   \(key) = \(v)")
+    } else {
+        print("   \(key) = \(describe(get(svc, key)))")
+    }
+}
+
+func cmdWriteData(_ id: UInt64, key: String, path: String) {
+    guard let svc = serviceForRegistryID(id) else { print("no service"); return }
+    guard let ref = get(svc, key) else { print("nil property"); return }
+    if let data = ref as? Data {
+        let hex = data.map { String(format: "%02x", $0) }.joined()
+        try? hex.write(toFile: path, atomically: true, encoding: .utf8)
+        print("wrote \(data.count) bytes to \(path) (\(hex.count/2) hex chars)")
+    } else {
+        print("not data: \(ref)")
+    }
+}
+
+func cmdWriteArray(_ id: UInt64, key: String, path: String) {
+    guard let svc = serviceForRegistryID(id) else { print("no service"); return }
+    guard let ref = get(svc, key) else { print("nil property"); return }
+    if let arr = ref as? NSArray {
+        if let json = try? JSONSerialization.data(withJSONObject: arr, options: [.prettyPrinted]),
+           let str = String(data: json, encoding: .utf8) {
+            try? str.write(toFile: path, atomically: true, encoding: .utf8)
+            print("wrote \(arr.count) entries to \(path)")
+        } else {
+            print("could not serialize: \(ref)")
+        }
+    } else {
+        print("not array: \(ref)")
+    }
 }
 
 func cmdSetSimple(_ id: UInt64, key: String, valueString: String) {
@@ -440,6 +497,10 @@ func usage() {
       param-dump | param-get <key> | param-set <key> <value> | param-setaccel <key> <double>
       get-system <key>
       get-simple <0xREGISTRYID> <key>
+      get-id <0xREGISTRYID> <key>
+      get-id-raw <0xREGISTRYID> <key>
+      write-data <0xREGISTRYID> <key> <outfile>      # dump CFData property as hex
+      write-array <0xREGISTRYID> <key> <outfile>     # dump CFArray property as JSON
       map
       access
     """)
@@ -475,6 +536,18 @@ case "set-system":
 case "get-system":
     guard args.count >= 3 else { usage(); exit(1) }
     cmdGetSystem(args[2])
+case "write-data":
+    guard args.count >= 5, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdWriteData(id, key: args[3], path: args[4])
+case "write-array":
+    guard args.count >= 5, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdWriteArray(id, key: args[3], path: args[4])
+case "get-id-raw":
+    guard args.count >= 4, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdGetByID(id, key: args[3], raw: true)
+case "get-id":
+    guard args.count >= 4, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
+    cmdGetByID(id, key: args[3])
 case "set-simple":
     guard args.count >= 5, let id = UInt64(args[2].replacingOccurrences(of: "0x", with: ""), radix: 16) else { usage(); exit(1) }
     cmdSetSimple(id, key: args[3], valueString: args[4])
