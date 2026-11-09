@@ -24,6 +24,43 @@ struct DecelerateApp: App {
     }
 }
 
+/// Brings the app's Settings window to the front.
+///
+/// Decelerate is an `LSUIElement` menu bar app: clicking its menu bar panel does
+/// not activate the process, so SwiftUI's `openSettings` action can create the
+/// Settings window *behind* the frontmost app. Activating the app and ordering
+/// the window front fixes that. The window may be created a moment after the
+/// action runs, so the activation is retried briefly.
+@MainActor
+enum SettingsPresenter {
+    /// Opens the Settings scene and guarantees the app/window come to the front.
+    /// The panel button is a user event, so the activation request is honoured.
+    static func present(_ open: () -> Void) {
+        activateNow()
+        open()
+        activate()
+    }
+
+    static func activate() {
+        activateNow()
+        for delay in [0.05, 0.2, 0.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                activateNow()
+            }
+        }
+    }
+
+    private static func activateNow() {
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        NSApp.activate(ignoringOtherApps: true)
+        // The menu bar panel itself is a non-main window (canBecomeMain == false),
+        // so this only raises the Settings window.
+        for window in NSApp.windows where window.isVisible && window.canBecomeMain {
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var previewWindows: [NSWindow] = []
@@ -57,6 +94,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let seconds = Double(arguments[index + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
                 NSApp.terminate(nil)
+            }
+        }
+        if arguments.contains("--activate-test") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                SettingsPresenter.activate()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    DebugLog.write("activate-test: active=\(NSApp.isActive) policy=\(NSApp.activationPolicy().rawValue) key=\(NSApp.keyWindow?.title ?? "nil")")
+                }
             }
         }
         if arguments.contains("--test-login-item") {
@@ -123,8 +168,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openSettingsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
         if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
             _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
+        SettingsPresenter.activate()
     }
 }

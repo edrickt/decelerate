@@ -85,7 +85,7 @@ struct MenuBarPanel: View {
 
             HStack(spacing: 12) {
                 Button("Settings…") {
-                    openSettings()
+                    SettingsPresenter.present { openSettings() }
                 }
                 .buttonStyle(.link)
 
