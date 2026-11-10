@@ -64,7 +64,11 @@ patched.
 - Scroll acceleration is untouched. It is a separate HID parameter.
 - Decelerate re-applies its state if macOS rewrites the parameter, for example
   when you move the Tracking speed slider, after sleep, and when a device is
-  attached.
+  attached. Sleep/wake recreates the HID services (the built-in trackpad comes
+  back with a new registry ID), so Decelerate re-creates its event-system
+  connection and retries the apply for a few seconds until the devices are back.
+  Without that, a stale connection makes macOS fall back to its own acceleration
+  curve until the app is relaunched.
 - Quitting restores macOS. The override exists only while Decelerate runs, and
   the menu bar icon shows that it is running.
 - A crash cannot leave the Mac permanently patched: the original values are

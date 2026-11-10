@@ -14,6 +14,7 @@ struct PreferencesStore {
         static let showDockIcon = "general.showDockIcon"
         static let onboardingDone = "general.onboardingDone"
         static let accelerationOriginals = "system.accelerationOriginals"
+        static let accelerationWrites = "system.accelerationWrites"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -62,6 +63,22 @@ struct PreferencesStore {
 
     func clearAccelerationOriginals() {
         defaults.removeObject(forKey: Key.accelerationOriginals)
+    }
+
+    /// Values Decelerate last wrote into the HID parameter dictionary. They are
+    /// persisted so a crash or relaunch can still tell Decelerate's own output
+    /// (for example an index-scaled value) apart from the user's own setting
+    /// when rebuilding the snapshot of the original parameters.
+    func saveAccelerationWrites(_ values: [String: Int32]) {
+        encode(values, forKey: Key.accelerationWrites)
+    }
+
+    func loadAccelerationWrites() -> [String: Int32] {
+        decode(Key.accelerationWrites) ?? [:]
+    }
+
+    func clearAccelerationWrites() {
+        defaults.removeObject(forKey: Key.accelerationWrites)
     }
 
     // MARK: - Helpers

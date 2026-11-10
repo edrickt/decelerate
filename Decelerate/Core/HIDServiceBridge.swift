@@ -68,6 +68,14 @@ struct HIDPointerService {
     var isTrackpad: Bool {
         accelerationType == HIDPropertyKey.trackpadAcceleration
     }
+
+    /// The device exposes macOS's parametric acceleration curves. Curve-based
+    /// devices must be shaped through `UserPointerAccelCurvesKey`, never by
+    /// scaling the acceleration index.
+    var hasNativeCurves: Bool { nativeCurves != nil }
+
+    /// The device has a readable classic acceleration table.
+    var hasAccelerationTable: Bool { nativeTable != nil }
 }
 
 /// Access to the pointer event services and their acceleration properties.
@@ -84,13 +92,26 @@ final class HIDServiceBridge {
         return unsafeBitCast(symbol, to: CreateClientFn.self)
     }()
 
-    private let client: IOHIDEventSystemClient?
+    private let clientFactory: CreateClientFn?
+    private var client: IOHIDEventSystemClient?
 
     init() {
-        client = Self.createClient?(kCFAllocatorDefault)
+        clientFactory = Self.createClient
+        client = clientFactory?(kCFAllocatorDefault)
     }
 
     var isAvailable: Bool { client != nil }
+
+    /// Re-creates the connection to the HID event system.
+    ///
+    /// The client is a connection, not a snapshot: macOS tears these down
+    /// across sleep/wake and re-creates the device services with new registry
+    /// IDs. A client created before sleep keeps returning the old, dead service
+    /// objects, whose acceleration representation can no longer be read, so it
+    /// must be replaced whenever the environment changes (wake, device attach).
+    func refresh() {
+        client = clientFactory?(kCFAllocatorDefault)
+    }
 
     // MARK: - Services
 
@@ -98,11 +119,13 @@ final class HIDServiceBridge {
         guard let client, let array = IOHIDEventSystemClientCopyServices(client) else { return [] }
         let count = CFArrayGetCount(array)
         var result: [HIDPointerService] = []
+        var seen = Set<UInt64>()
         for index in 0..<count {
             guard let raw = CFArrayGetValueAtIndex(array, index) else { continue }
             let ref = unsafeBitCast(raw, to: IOHIDServiceClient.self)
             guard isPointer(ref) else { continue }
             let registryID = (IOHIDServiceClientGetRegistryID(ref) as? NSNumber)?.uint64Value ?? 0
+            if registryID != 0, !seen.insert(registryID).inserted { continue }
             let product = string(ref, HIDPropertyKey.product) ?? "Pointing Device"
             var accelerationType = string(ref, HIDPropertyKey.accelerationType) ?? ""
             if accelerationType.isEmpty {
@@ -170,6 +193,13 @@ final class HIDServiceBridge {
         }
         return IOHIDServiceClientSetProperty(service, HIDPropertyKey.userCurves as CFString, array as CFArray)
     }
+
+    // Note: `UserPointerAccelCurvesKey` is write-only from this side. The
+    // WindowServer filter reads the value Decelerate sets, but copying the
+    // property back (`IOHIDServiceClientCopyProperty`) returns nil even in the
+    // writing process, so applied curves cannot be verified by read-back. The
+    // `IOHIDServiceClientSetProperty` return value plus the filter's own log
+    // (`filterlog.sh`) are the available evidence.
 
     @discardableResult
     func clearCurves(on service: IOHIDServiceClient) -> Bool {

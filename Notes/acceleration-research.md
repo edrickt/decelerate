@@ -199,7 +199,7 @@ negative raw value to disable, and non-negative values for linear gain.
 | Event | Does linear mode survive? | Evidence |
 |---|---|---|
 | App (the writer process) quits | Yes: state lives in WindowServer/kernel, not in the process | Set −65536 from process A, exited; process B triggered a filter re-read and log still showed `Pointer acceleration (disabled)` |
-| Sleep/wake | Not tested on the user's machine (would not sleep their Mac). Likely survives; re-apply on `NSWorkspace.didWakeNotification` to be safe |
+| Sleep/wake | Yes, but macOS re-creates the HID services during wake. The event-system connection is stale afterwards, so the app must reconnect, re-enumerate and re-apply (§5.1) | Verified live: trackpad service registry ID 4295767317 before sleep, 4295767616 after wake; user curves lost with the old service |
 | Logout/reboot | Expected no: parameters are runtime state, not stored in `com.apple.*` defaults (no plist was created by any write) | No defaults were written by any experiment; `defaults` unchanged |
 | System Settings "Tracking speed" slider change | Rewrites a positive value, which re-enables acceleration | Verified: writing a positive value back re-enables the filter; therefore re-apply on prefs change |
 | Changing `com.apple.trackpad.scaling` via `defaults write` | Does not apply live (§2) | mirror/filter unchanged for 2→0→1→2 |
@@ -225,6 +225,52 @@ disable. If both may have been used, write the positive value through both the
 `IOHIDServiceClient` path for the trackpad service and the system-level/param paths, then
 re-read the live filter (`filterlog.sh`) to confirm. Never assume a kernel-param readback
 proves the live pointer is enabled.
+
+### 5.1 Sleep/wake: services are recreated, connections go stale (1.4.2)
+
+Sleep/wake only became testable once a real user hit it (macOS 26, lid close). The
+built-in trackpad lost Decelerate's state on wake. Live evidence:
+
+- Wake re-creates the trackpad's HID event service. The WindowServer filter logged the
+  service as `[4295767317]` before sleep and `[4295767616]` after wake, so the registry
+  ID, the service object and the `UserPointerAccelCurvesKey` override installed on it
+  are all gone.
+- An `IOHIDEventSystemClient` created before sleep keeps returning the dead service
+  objects. Their `HIDAccelCurves` property is unreadable afterwards, so a route that
+  derives "parametric curves vs classic table" from that enumeration concluded "table"
+  and applied the classic acceleration-index scaling to the built-in trackpad. Live
+  values: the user's tracking speed is 2.5 (`HIDTrackpadAcceleration` 163840), and the
+  app wrote 81655 (`163840 × 0.498`). That selects a different, slower native curve
+  instead of the blended user curve, which is why the pointer felt wrong until the app
+  was relaunched.
+- The same stale enumeration also corrupted the restored-baseline snapshot:
+  `captureOriginalsIfNeeded` treated Decelerate's own scaled write as the user's
+  original, so the stored baseline became 81655 and every further apply scaled it
+  again (81655 → 40696 → …). Quitting from that state would have restored the wrong
+  value into macOS.
+
+Fix in Decelerate 1.4.2:
+
+- Recreate the event-system client on `NSWorkspace.didWakeNotification`,
+  `screensDidWakeNotification` and device attach, and re-open the IOHIDSystem
+  parameter connection.
+- Treat services whose acceleration representation cannot be read as *unresolved*
+  instead of guessing the table route, and retry the apply with backoff
+  (0.25 s … 10 s) while macOS re-registers the devices. Only after every retry has
+  failed, and only for the mouse class (where table-only devices live), is an
+  unreadable representation accepted as a classic table device: the trackpad class
+  is always curve-based, so it is never index-scaled.
+- Never let the snapshot capture Decelerate's own writes (the last written values are
+  persisted as `system.accelerationWrites`), and repair the snapshot from
+  `com.apple.{trackpad,mouse}.scaling` when it disagrees, since macOS keeps that
+  setting in lockstep with the HID parameters.
+- Prune service IDs that a wake or detach invalidated, so curve cleanup never targets
+  dead services.
+
+Verified after the fix: `HIDTrackpadAcceleration` = 163840 and
+`UserPointerAccelCurvesKey` on the trackpad service is a 10-curve blended array at
+launch, and both survive the simulated wake path (`--simulate-wake`, a dev-only QA
+flag).
 
 ---
 
@@ -409,8 +455,8 @@ bin/hidprobe param-set HIDTrackpadAcceleration int:131072 ; ./filterlog.sh 5
 2. Mouse per-velocity gain numbers (optional, needs an external mouse): use
    `tapmeasure` per §4; expected: disabled gives gain 1.0 at all velocities; linear flag
    plus value g gives gain of g/65536; default accelerated makes gain rise with velocity.
-3. Sleep/wake and logout persistence not tested (would disturb the user's session);
-   the app should re-apply on wake and at launch.
+3. Sleep/wake is covered in §5.1 (fixed in 1.4.2); logout persistence is not tested
+   (would disturb the user's session); the app re-applies on wake and at launch.
 4. Note on trackpad sensitivity: disabled acceleration means raw deltas at
    `HIDPointerResolution≈400 dpi`; if that feels too slow, the only property-level knob
    is `HIDPointerResolution` (LinearMouse's "speed"), which affects the accelerated

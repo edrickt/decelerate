@@ -120,6 +120,16 @@ final class HIDPointerControl {
     @discardableResult
     func reopenIfNeeded() -> Bool {
         if handle != 0, readRaw(HIDPointerParameter.pointerKey) != nil { return true }
+        forceReopen()
+        return handle != 0
+    }
+
+    /// Closes and re-opens the parameter connection unconditionally. Used after
+    /// sleep/wake: a connection can survive the sleep in a half-dead state where
+    /// reads still succeed but writes never reach the live HID system, so a
+    /// liveness probe is not enough.
+    @discardableResult
+    func forceReopen() -> Bool {
         if handle != 0 {
             IOServiceClose(handle)
             handle = 0

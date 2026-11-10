@@ -22,8 +22,11 @@ import Foundation
 ///  1. The change happens inside the HID pipeline, so the pointer keeps
 ///     macOS's own behavior.
 ///  2. Settings re-apply on wake, on device attach, and whenever macOS
-///     rewrites the parameters.
-///  3. Originals are snapshotted and restored exactly.
+///     rewrites the parameters. Sleep/wake recreates the HID services, so the
+///     event-system client is re-created and the apply is retried until the
+///     devices are back (see `reapplyAfterEnvironmentChange`).
+///  3. Originals are snapshotted and restored exactly, and the snapshot can
+///     never be corrupted by Decelerate's own writes (see `captureOriginals`).
 @MainActor
 final class AccelerationController {
     static let shared = AccelerationController()
@@ -42,10 +45,21 @@ final class AccelerationController {
         static let native: Int32 = 2
     }
 
-    private enum Route {
+    /// How a pointer class must be shaped, derived from the services that are
+    /// actually visible right now.
+    private enum Route: Equatable {
+        /// The services expose parametric acceleration curves.
         case curves
+        /// The services expose only the classic acceleration table.
         case indexScaling
-        case none
+        /// No device of this class is attached.
+        case absent
+        /// Services exist but their acceleration representation cannot be read.
+        /// This is what a stale event-system enumeration looks like after
+        /// sleep/wake. Never guess a route here: applying the classic
+        /// acceleration-index scaling to a curve-based device silently changes
+        /// the pointer feel instead of failing.
+        case unresolved
     }
 
     private let parameters: HIDPointerControl
@@ -58,15 +72,32 @@ final class AccelerationController {
     private var originals: [String: Int32] = [:]
     /// Services that currently carry a Decelerate curve override.
     private var overriddenServices: Set<UInt64> = []
-    /// Values written by this controller, so its own writes are not mistaken
-    /// for external changes.
+    /// Values written by this controller (persisted), so its own writes are not
+    /// mistaken for external changes or for the user's original setting.
     private var lastWritten: [String: Int32] = [:]
     private var isReapplying = false
     private var isTerminating = false
     /// While a re-apply is writing parameters, property-change callbacks are
     /// echoes of our own writes and must not be mistaken for user changes.
     private var suppressExternalChangesUntil = Date.distantPast
-    private var wakeObserver: NSObjectProtocol?
+    private var changeHandler: (() -> Void)?
+    private var wakeObservers: [NSObjectProtocol] = []
+
+    /// Bounded backoff for re-applies while macOS re-registers the HID services
+    /// after wake or attach. Total window is about 18 s, which covers the
+    /// trackpad and a Bluetooth mouse coming back.
+    private static let retryDelays: [TimeInterval] = [0.25, 0.75, 2, 5, 10]
+    private var retryAttempt = 0
+    private var retryWorkItem: DispatchWorkItem?
+    /// Pointer classes that had HID services during the last apply. Used after
+    /// wake: a class that had services before sleeping may briefly look absent
+    /// while macOS re-registers the device, and only such classes are retried.
+    private var classesWithServices: Set<PointerClass> = []
+    private var retryMissingClasses: Set<PointerClass> = []
+    /// True while running the last allowed retry. Used as the point where an
+    /// unreadable acceleration representation is accepted as genuine (see
+    /// `performApply`).
+    private var isFinalRetryAttempt = false
 
     private(set) var lastError: String?
     /// Retained for API stability: this implementation intercepts no input and
@@ -78,17 +109,25 @@ final class AccelerationController {
         self.parameters = HIDPointerControl()
         self.bridge = HIDServiceBridge()
         self.scanner = HIDDeviceScanner()
-        // Snapshots written by older/buggy builds can be corrupt (a valid
-        // acceleration value is a curve selector in a known range; a stray
-        // value like 1 selects the identity curve and leaves the pointer
-        // permanently slow). Validate every entry and derive a sane fallback
-        // from the user's own macOS tracking-speed setting.
+        self.lastWritten = store.loadAccelerationWrites()
+            .filter { Self.managedKeys.contains($0.key) }
+
+        // Snapshot of the user's own acceleration values, so macOS can be put
+        // back exactly. The macOS tracking-speed setting is the ground truth:
+        // macOS keeps `com.apple.trackpad.scaling` / `com.apple.mouse.scaling`
+        // in lockstep with the HID parameters. Prefer it when it exists so a
+        // snapshot corrupted by an older build (which could capture
+        // Decelerate's own index-scaled write as the "original") is repaired
+        // instead of being restored.
         var loaded = store.loadAccelerationOriginals()
         for key in Self.managedKeys {
-            if let raw = loaded[key], Self.isPlausibleOriginal(raw) {
+            if let setting = Self.macOSSettingRaw(forKey: key) {
+                loaded[key] = setting
+            } else if let stored = loaded[key], Self.isPlausibleOriginal(stored) {
                 continue
+            } else {
+                loaded[key] = Self.fallbackValue(forKey: key)
             }
-            loaded[key] = Self.trackingSpeedRaw(forKey: key)
         }
         self.originals = loaded
         store.saveAccelerationOriginals(loaded)
@@ -101,26 +140,25 @@ final class AccelerationController {
         raw >= 8_192 && raw <= 196_608
     }
 
-    /// Derives the acceleration value matching the user's macOS tracking-speed
-    /// slider, so "100%" matches their normal macOS setting even if our snapshot
-    /// is missing or was corrupted.
-    private static func trackingSpeedRaw(forKey key: String) -> Int32 {
+    /// The HID acceleration value that matches the user's macOS tracking-speed
+    /// setting, when that setting exists. `UserDefaults.standard` also searches
+    /// the global domain, so the `com.apple.*.scaling` key is visible here.
+    private static func macOSSettingRaw(forKey key: String) -> Int32? {
         let defaultsKey = key == HIDPropertyKey.trackpadAcceleration
             ? "com.apple.trackpad.scaling"
             : "com.apple.mouse.scaling"
-        if let number = UserDefaults.standard.object(forKey: defaultsKey) as? NSNumber {
-            let raw = Int32((number.doubleValue * 65_536.0).rounded())
-            if isPlausibleOriginal(raw) { return raw }
+        guard let number = UserDefaults.standard.object(forKey: defaultsKey) as? NSNumber else {
+            return nil
         }
-        return key == HIDPropertyKey.trackpadAcceleration
-            ? HIDPropertyKey.trackpadFallback
-            : HIDPropertyKey.mouseFallback
+        let raw = Int32((number.doubleValue * 65_536.0).rounded())
+        return isPlausibleOriginal(raw) ? raw : nil
     }
 
     /// The value to hand back to macOS for a key, guaranteed to be sane.
     private func originalValue(forKey key: String) -> Int32 {
+        if let setting = Self.macOSSettingRaw(forKey: key) { return setting }
         if let raw = originals[key], Self.isPlausibleOriginal(raw) { return raw }
-        let derived = Self.trackingSpeedRaw(forKey: key)
+        let derived = Self.fallbackValue(forKey: key)
         originals[key] = derived
         return derived
     }
@@ -166,24 +204,34 @@ final class AccelerationController {
     }
 
     func startMonitoring(onChange: @escaping () -> Void) {
+        changeHandler = onChange
         scanner.startMonitoring { [weak self] in
             OnMain.run {
-                onChange()
-                self?.reapply()
+                guard let self else { return }
+                self.changeHandler?()
+                self.reapplyAfterEnvironmentChange(retryMissingDevices: false)
             }
         }
         parameters.startObserving(keys: Self.managedKeys) { [weak self] key, raw in
             OnMain.run { self?.systemParameterChanged(key, raw) }
         }
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            OnMain.run {
-                _ = self?.parameters.reopenIfNeeded()
-                self?.reapply()
+        // Sleep/wake is the important one: macOS recreates the HID services and
+        // the built-in trackpad gets a new registry ID, so both the service
+        // enumeration and the applied curves are lost.
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            let observer = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                OnMain.run {
+                    guard let self else { return }
+                    DebugLog.write("environment: \(name.rawValue)")
+                    self.changeHandler?()
+                    self.reapplyAfterEnvironmentChange(retryMissingDevices: true)
+                }
             }
+            wakeObservers.append(observer)
         }
     }
 
@@ -198,80 +246,238 @@ final class AccelerationController {
 
     func stopMonitoring() {
         scanner.stopMonitoring()
-        if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
-            self.wakeObserver = nil
+        for observer in wakeObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
+        wakeObservers.removeAll()
+        cancelRetries()
     }
 
     // MARK: - Apply
 
     /// Applies the desired acceleration amount for both pointer classes.
     /// Safe and cheap to call repeatedly; this is the entry point used to
-    /// re-apply settings.
+    /// re-apply settings. If the HID services are not ready yet (the normal
+    /// case right after wake, while macOS re-registers the devices), a bounded
+    /// retry loop re-applies once they are.
     func apply(_ preferences: [PointerClass: CategoryPreferences]) {
         desired = preferences
+        retryAttempt = 0
+        attemptApply()
+    }
+
+    func reapply() {
+        guard !desired.isEmpty, !isTerminating else { return }
+        apply(desired)
+    }
+
+    /// Re-applies after the HID environment changed (wake, device attach,
+    /// removal). The connections are replaced first: macOS re-creates the
+    /// pointer services across sleep, and a client created before sleep keeps
+    /// reporting the dead ones.
+    ///
+    /// `retryMissingDevices` is set on wake, where a pointer class can briefly
+    /// look absent while macOS re-registers its devices.
+    private func reapplyAfterEnvironmentChange(retryMissingDevices: Bool) {
+        guard !desired.isEmpty, !isTerminating else { return }
+        parameters.forceReopen()
+        bridge.refresh()
+        retryAttempt = 0
+        isFinalRetryAttempt = false
+        retryMissingClasses = retryMissingDevices ? classesWithServices : []
+        DebugLog.write("re-apply: HID clients refreshed after environment change")
+        attemptApply()
+    }
+
+    private func attemptApply() {
+        guard !isTerminating else { return }
+        isFinalRetryAttempt = retryAttempt >= Self.retryDelays.count
+        let needsRetry = performApply()
+        guard needsRetry else {
+            cancelRetries()
+            return
+        }
+        guard retryAttempt < Self.retryDelays.count else {
+            DebugLog.write("re-apply: retries exhausted, leaving the current parameters")
+            retryWorkItem?.cancel()
+            retryWorkItem = nil
+            retryMissingClasses = []
+            return
+        }
+        let delay = Self.retryDelays[retryAttempt]
+        retryAttempt += 1
+        DebugLog.write("re-apply: HID services not ready, retry \(retryAttempt) in \(delay)s")
+        retryWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.parameters.reopenIfNeeded()
+            self.bridge.refresh()
+            self.attemptApply()
+        }
+        retryWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    private func cancelRetries() {
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
+        retryAttempt = 0
+        retryMissingClasses = []
+        isFinalRetryAttempt = false
+    }
+
+    /// Applies the desired state once. Returns true when the HID services were
+    /// not ready (or a write was rejected), i.e. another attempt may succeed.
+    private func performApply() -> Bool {
+        guard !desired.isEmpty else { return false }
         guard parameters.isAvailable else {
             lastError = "The HID system is unavailable on this Mac."
-            return
+            return true
         }
         captureOriginalsIfNeeded()
         suppressExternalChangesUntil = Date().addingTimeInterval(0.75)
 
         let services = bridge.pointerServices()
         var rejected = false
+        var needsRetry = false
+        var observedClasses: Set<PointerClass> = []
+
         for pointerClass in PointerClass.allCases {
-            let category = preferences[pointerClass] ?? CategoryPreferences()
+            let category = desired[pointerClass] ?? CategoryPreferences()
             let amount = category.accelerationAmount
             let speed = category.speedMultiplier
             let classServices = services.filter { Self.pointerClass(for: $0) == pointerClass }
+            if !classServices.isEmpty { observedClasses.insert(pointerClass) }
             let route = Self.route(for: classServices)
             let keys = Self.parameterKeys(for: pointerClass)
+            DebugLog.write("apply: \(pointerClass) amount=\(amount) speed=\(speed) route=\(route) services=\(classServices.count)")
+
+            // Enumeration is stale (right after wake): leave the parameters
+            // alone rather than guessing a representation. Only after every
+            // retry with a fresh client has failed -- and only for the mouse
+            // class, which is where table-only devices live -- is an unreadable
+            // representation accepted as a genuine classic-table device. The
+            // trackpad class is always curve-based (built-in and Magic
+            // Trackpads), so a trackpad whose curves cannot be read is stale,
+            // never a table device, and must never be index-scaled.
+            let treatAsTable = pointerClass == .mouse && isFinalRetryAttempt
+            if route == .unresolved {
+                guard treatAsTable else {
+                    needsRetry = true
+                    continue
+                }
+                DebugLog.write("apply: \(pointerClass) curves unreadable, using table scaling")
+            }
+            let effectiveRoute: Route = route == .unresolved ? .indexScaling : route
 
             if amount <= Threshold.linear {
-                // No acceleration: a constant-gain curve. Gain 1.0 is the
-                // physical 1:1 identity, so the speed multiplier is what makes
-                // 1:1 usable at ordinary hand speed (Windows has the same
-                // pointer-speed slider with "enhance pointer precision" off).
-                if !installConstantCurves(speed: speed, on: classServices) { rejected = true }
-            } else if route == .curves {
+                // No acceleration: a constant-gain user curve. User curves take
+                // priority over both the parametric curves and the classic
+                // table, so this works for every device class.
+                if !installConstantCurves(speed: speed, on: classServices) {
+                    rejected = true
+                    needsRetry = true
+                }
+                if classServices.isEmpty, retryMissingClasses.contains(pointerClass) {
+                    needsRetry = true
+                }
+                // Curves only take effect while acceleration itself is enabled.
+                for key in keys {
+                    if !write(key, originalValue(forKey: key)) {
+                        rejected = true
+                        needsRetry = true
+                    }
+                }
+                continue
+            }
+
+            switch effectiveRoute {
+            case .curves:
                 if amount >= Threshold.native, abs(speed - 1.0) < 0.01 {
                     // Exactly macOS's own curve: hand control back.
                     if !clearOverrides(on: classServices) { rejected = true }
                 } else {
-                    if !installBlendedCurves(amount, speed: speed, on: classServices) { rejected = true }
-                    if !clearOverrides(on: classServices, except: classServices.map(\.registryID)) { rejected = true }
+                    if !installBlendedCurves(amount, speed: speed, on: classServices) {
+                        rejected = true
+                        needsRetry = true
+                    }
+                    if !clearOverrides(on: classServices, except: classServices.map(\.registryID)) {
+                        rejected = true
+                    }
                 }
-            } else if route == .indexScaling {
+                // Curves only take effect while acceleration itself is enabled.
+                for key in keys {
+                    if !write(key, originalValue(forKey: key)) {
+                        rejected = true
+                        needsRetry = true
+                    }
+                }
+
+            case .indexScaling:
                 // Table-only devices (most third-party mice) do not expose
                 // parametric curves; amount is the table's own interpolation
                 // (scale the acceleration index). Speed cannot be scaled there.
                 if !clearOverrides(on: classServices) { rejected = true }
                 if amount >= Threshold.native {
-                    for key in keys { if !write(key, originalValue(forKey: key)) { rejected = true } }
-                    continue
+                    for key in keys {
+                        if !write(key, originalValue(forKey: key)) {
+                            rejected = true
+                            needsRetry = true
+                        }
+                    }
+                } else {
+                    for key in keys {
+                        if !writeScaled(key, amount: amount) {
+                            rejected = true
+                            needsRetry = true
+                        }
+                    }
                 }
-                for key in keys { if !writeScaled(key, amount: amount) { rejected = true } }
-                continue
-            } else {
-                // No device of this class is attached: hand the parameters back.
+
+            case .absent:
+                // No device of this class is attached: hand the parameters
+                // back so macOS stays sane without it, and retry when the
+                // device is (or should be) present but has no HID service yet.
                 if !clearOverrides(on: classServices) { rejected = true }
-                for key in keys { if !write(key, originalValue(forKey: key)) { rejected = true } }
-                continue
-            }
-            // Curves only take effect while acceleration itself is enabled.
-            for key in keys {
-                if !write(key, originalValue(forKey: key)) { rejected = true }
+                for key in keys {
+                    if !write(key, originalValue(forKey: key)) {
+                        rejected = true
+                        needsRetry = true
+                    }
+                }
+                if amount < Threshold.native, retryMissingClasses.contains(pointerClass) {
+                    needsRetry = true
+                }
+
+            case .unresolved:
+                needsRetry = true
             }
         }
+
+        classesWithServices = observedClasses
+
+        // Registry IDs never come back, so overrides recorded for services that
+        // detached (or were recreated by a wake) can never be cleared again.
+        // Keeping them would only grow the set across every wake and attach.
+        overriddenServices.formIntersection(Set(services.map(\.registryID)))
+
         persistOriginals()
         lastError = rejected ? "macOS rejected a pointer acceleration setting." : nil
+        if rejected {
+            DebugLog.write("apply: macOS rejected one or more pointer parameter writes")
+        }
+        return needsRetry || rejected
     }
 
     /// Restores the user's original acceleration. Used when turning the feature
     /// off and when the app quits, so quitting never leaves the Mac patched.
     func restoreSystemState() {
+        cancelRetries()
+        // A wake notification can be missed, so never restore through possibly
+        // stale connections.
+        parameters.forceReopen()
         guard parameters.isAvailable else { return }
+        bridge.refresh()
         let services = bridge.pointerServices()
         overriddenServices.formUnion(services.map(\.registryID))
         var rejected = false
@@ -285,22 +491,25 @@ final class AccelerationController {
         originals.removeAll()
         lastWritten.removeAll()
         persistOriginals()
+        persistWrites()
         lastError = rejected ? "Could not restore the original pointer acceleration." : nil
-    }
-
-    func reapply() {
-        guard !desired.isEmpty, !isTerminating else { return }
-        apply(desired)
     }
 
     // MARK: - Routing
 
+    /// Derives the shaping route from the services that are visible right now.
+    ///
     /// Parametric curves exist on Apple trackpads (and some Apple mice). Devices
     /// without them use the classic acceleration table, whose interpolation can
-    /// be driven by scaling the acceleration index instead.
+    /// be driven by scaling the acceleration index instead. Services with
+    /// neither representation are treated as unresolved (stale enumeration);
+    /// the caller retries instead of guessing.
     private static func route(for services: [HIDPointerService]) -> Route {
-        if services.isEmpty { return .none }
-        return services.allSatisfy({ $0.nativeCurves != nil }) ? .curves : .indexScaling
+        guard !services.isEmpty else { return .absent }
+        if services.allSatisfy({ $0.hasNativeCurves }) { return .curves }
+        let tableOnly = services.filter { !$0.hasNativeCurves }
+        if tableOnly.allSatisfy({ $0.hasAccelerationTable }) { return .indexScaling }
+        return .unresolved
     }
 
     // MARK: - Curve installation
@@ -361,6 +570,7 @@ final class AccelerationController {
     @discardableResult
     private func write(_ key: String, _ raw: Int32) -> Bool {
         lastWritten[key] = raw
+        persistWrites()
         // Avoid churning the HID pipeline when the value is already correct;
         // curve changes trigger their own rebuild.
         if parameters.readRaw(key) == raw { return true }
@@ -373,7 +583,8 @@ final class AccelerationController {
     private func writeScaled(_ key: String, amount: Double) -> Bool {
         let base = originalValue(forKey: key)
         let scaled = max(8_192, Int32((Double(base) * amount).rounded()))
-        return write(key, scaled)
+        // Scaling can only reduce the index, never raise it.
+        return write(key, min(scaled, base))
     }
 
     // MARK: - Snapshot
@@ -382,6 +593,15 @@ final class AccelerationController {
         var captured = false
         for key in Self.managedKeys {
             guard let raw = parameters.readRaw(key), Self.isPlausibleOriginal(raw) else { continue }
+            // Never mistake Decelerate's own applied value for the user's
+            // original. For table-based devices the live parameter is our
+            // scaled write; capturing it would compound the scaling on every
+            // re-apply and every relaunch, and make quit restore the wrong
+            // value.
+            if lastWritten[key] == raw { continue }
+            // When macOS exposes the tracking-speed setting it is authoritative
+            // and the snapshot must not drift away from it.
+            if Self.macOSSettingRaw(forKey: key) != nil { continue }
             if originals[key] != raw {
                 originals[key] = raw
                 captured = true
@@ -398,6 +618,14 @@ final class AccelerationController {
         }
     }
 
+    private func persistWrites() {
+        if lastWritten.isEmpty {
+            store.clearAccelerationWrites()
+        } else {
+            store.saveAccelerationWrites(lastWritten)
+        }
+    }
+
     // MARK: - External changes
 
     private func systemParameterChanged(_ key: String, _ raw: Int32) {
@@ -409,6 +637,10 @@ final class AccelerationController {
         guard let pointerClass = Self.pointerClass(forParameterKey: key) else { return }
         guard let amount = desired[pointerClass]?.accelerationAmount,
               amount > Threshold.linear, amount < Threshold.native else { return }
+        // A genuine external change is a good moment to re-enumerate: wake
+        // rewrites can arrive around the same time, and a decision about the
+        // shaping route must never be made from a stale event-system client.
+        bridge.refresh()
         if Self.isPlausibleOriginal(raw) {
             originals[key] = raw
             persistOriginals()
@@ -452,7 +684,14 @@ final class AccelerationController {
     /// Live view of the pointer services Decelerate can shape (diagnostics).
     var serviceSummary: [String] {
         bridge.pointerServices().map { service in
-            let representation = service.nativeCurves != nil ? "parametric curves" : "acceleration table"
+            let representation: String
+            if service.hasNativeCurves {
+                representation = "parametric curves"
+            } else if service.hasAccelerationTable {
+                representation = "acceleration table"
+            } else {
+                representation = "unknown encoding"
+            }
             return "\(service.product): \(representation)"
         }
     }

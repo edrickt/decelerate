@@ -96,6 +96,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
             }
         }
+        // QA hook: simulate a system wake so the wake re-apply path can be
+        // exercised from a script without putting the machine to sleep.
+        if arguments.contains("--simulate-wake") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                DebugLog.write("simulate-wake: posting NSWorkspace.didWakeNotification")
+                NSWorkspace.shared.notificationCenter.post(
+                    name: NSWorkspace.didWakeNotification, object: nil
+                )
+            }
+        }
         if arguments.contains("--activate-test") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 SettingsPresenter.activate()
