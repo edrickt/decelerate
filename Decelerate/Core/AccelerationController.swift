@@ -491,7 +491,10 @@ final class AccelerationController {
         // stale connections.
         parameters.forceReopen()
         bridge.refresh()
-        var rejected = false
+        // A restore that cannot reach the event-system services cannot clear a
+        // cached user curve, so it must not report success and drop the
+        // snapshot; keep it for the next launch to repair.
+        var rejected = !bridge.isAvailable
         // Clear the per-service user curves through the event system first; that
         // path does not need the IOHIDSystem parameter connection, so a failed
         // parameter reopen cannot leave the pointer shaped.
@@ -509,8 +512,8 @@ final class AccelerationController {
         lastError = rejected ? "Could not restore the original pointer acceleration." : nil
         guard !rejected else {
             // The Mac may still be patched, so the snapshot is the only data
-            // that can repair it. Keep it (and the last-written marks that stop
-            // it being mistaken for the user's original) for the next launch.
+            // that can repair it. Keep it, together with the last-written marks
+            // (which now always describe the live value), for the next launch.
             persistOriginals()
             persistWrites()
             return
@@ -594,12 +597,28 @@ final class AccelerationController {
 
     @discardableResult
     private func write(_ key: String, _ raw: Int32) -> Bool {
-        lastWritten[key] = raw
-        persistWrites()
         // Avoid churning the HID pipeline when the value is already correct;
         // curve changes trigger their own rebuild.
-        if parameters.readRaw(key) == raw { return true }
-        return parameters.writeRaw(key, raw)
+        let live = parameters.readRaw(key)
+        if live == raw {
+            lastWritten[key] = raw
+            persistWrites()
+            return true
+        }
+        let wrote = parameters.writeRaw(key, raw)
+        // Record the value that is actually live, not the requested one: on a
+        // rejected write the previous value is still in place, and for a
+        // table-only mouse that previous value can be Decelerate's own scaled
+        // index. Marking the rejected target instead would let the next
+        // launch's `captureOriginalsIfNeeded` adopt the scaled value as the
+        // user's original and compound the scaling on every relaunch.
+        if wrote {
+            lastWritten[key] = raw
+        } else if let live {
+            lastWritten[key] = live
+        }
+        persistWrites()
+        return wrote
     }
 
     /// Table-based devices: the table interpolates linearly between its identity

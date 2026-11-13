@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard wantsPreview || wantsSettings else { return }
 
         DispatchQueue.main.async { [weak self] in
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             if arguments.contains("--preview-panel") { self?.showPanelPreview() }
             if arguments.contains("--preview-settings") { self?.showSettingsPreview() }
             if wantsSettings { self?.openSettingsWindow() }
@@ -189,7 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openSettingsWindow() {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
             _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }

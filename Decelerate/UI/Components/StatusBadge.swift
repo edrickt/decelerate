@@ -2,8 +2,9 @@ import SwiftUI
 
 /// Compact status pill for the current pointer state.
 ///
-/// Green when pointer acceleration has been reduced, red for a failure, and
-/// neutral grey when macOS's default acceleration is fully in effect.
+/// Green when Decelerate is shaping the pointer (reduced acceleration or a
+/// non-1× Speed), red for a failure, and neutral grey when macOS's own
+/// acceleration and 1× speed are fully in effect.
 struct StatusBadge: View {
     let status: AppState.Status
 
@@ -54,15 +55,18 @@ struct StatusBadge: View {
 extension AppState {
     /// Display text for the status pill.
     ///
-    /// `Status.active` only says that acceleration was reduced; with a
-    /// continuous amount, "1:1 Pointer" would be wrong for partial settings, so
-    /// those are presented as "Custom".
+    /// `Status.active` only says that Decelerate is shaping the pointer. With a
+    /// continuous amount plus a separate Speed control, "1:1 Pointer" is only
+    /// right when every class is fully linear at 1× speed; partial amounts and
+    /// speed-only overrides are presented as "Custom".
     var statusPillLabel: String {
         guard status == .active else { return status.title }
-        let fullyLinear = PointerClass.allCases.allSatisfy {
-            preferences(for: $0).accelerationAmount <= 0.005
+        let isIdentity = PointerClass.allCases.allSatisfy {
+            let category = preferences(for: $0)
+            return category.accelerationAmount <= 0.005
+                && abs(category.speedMultiplier - 1.0) < 0.01
         }
-        return fullyLinear ? status.title : "Custom"
+        return isIdentity ? status.title : "Custom"
     }
 }
 

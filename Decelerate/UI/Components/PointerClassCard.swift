@@ -6,7 +6,7 @@ import SwiftUI
 /// movement) and macOS's own curve (100%). Because an unaccelerated pointer is
 /// slower at normal hand speed, a separate Speed control scales
 /// the 1:1 movement, like the Windows pointer-speed slider with "Enhance pointer
-/// precision" off. Its 0.5×–2× range is logarithmic so 1× sits in the middle.
+/// precision" off. Its 0.5×–2× range is logarithmic so 1.5× sits in the middle.
 struct PointerClassCard: View {
     let pointerClass: PointerClass
 
@@ -32,7 +32,7 @@ struct PointerClassCard: View {
         String(format: "%.2f×", speed)
     }
 
-    /// Logarithmic mapping so 1.00× is exactly the middle of the slider.
+    /// Logarithmic mapping so 1.50× is exactly the middle of the slider.
     private var speedPositionBinding: Binding<Double> {
         Binding(
             get: { SpeedScale.position(for: speed) },
@@ -45,9 +45,15 @@ struct PointerClassCard: View {
     private var accelerationCaption: String {
         switch percent {
         case 0:
-            return "No acceleration: 1:1 movement"
+            return abs(speed - 1.0) < 0.01
+                ? "No acceleration: 1:1 movement"
+                : "No acceleration: linear movement"
         case 100:
-            return "macOS default acceleration"
+            // At 100% the macOS curve is still scaled by Speed when it is not
+            // 1x, so claiming "macOS default acceleration" would be wrong.
+            return abs(speed - 1.0) < 0.01
+                ? "macOS default acceleration"
+                : "macOS curve at \(speedText) speed"
         default:
             return "Blended acceleration (\(percent)%)"
         }

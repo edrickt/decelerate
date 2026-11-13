@@ -101,8 +101,14 @@ final class AppState: ObservableObject {
 
     // MARK: - Derived
 
+    /// True when Decelerate is shaping the pointer: either an acceleration
+    /// amount is below 100%, or a Speed other than 1x still scales the curve.
+    /// A non-1x Speed is a real Decelerate override even at 100% acceleration,
+    /// so it must not be reported as "Off".
     var isEnabled: Bool {
-        preferences.values.contains { !$0.isNative }
+        preferences.values.contains {
+            !$0.isNative || abs($0.speedMultiplier - 1.0) >= 0.01
+        }
     }
 
     var connectedDeviceSummary: String {
@@ -112,8 +118,12 @@ final class AppState: ObservableObject {
     }
 
     var activeSummary: String {
-        let values = PointerClass.allCases.map { preferences(for: $0).accelerationAmount }
-        if values.allSatisfy({ $0 >= 0.995 }) { return "macOS default acceleration" }
+        let categories = PointerClass.allCases.map { preferences(for: $0) }
+        // "macOS default acceleration" is only true when Speed is not scaling
+        // the macOS curve either.
+        if categories.allSatisfy({ $0.isNative && abs($0.speedMultiplier - 1.0) < 0.01 }) {
+            return "macOS default acceleration"
+        }
         let parts: [String] = PointerClass.allCases.map { pointerClass in
             let category = preferences(for: pointerClass)
             let percent = Int((category.accelerationAmount * 100).rounded())
