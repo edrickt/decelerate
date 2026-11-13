@@ -549,3 +549,19 @@ by `s, √s, ∛s, ⁴√s` so `gain'(v) = s·gain(v)`, including at 0 % acceler
 where the installed curve is a constant `GL = s`. Default 3.0×; range
 0.5×–6.0×. Table-only mice cannot expose a parametric curve, so their Speed
 control is inert (amount still works via the index interpolation).
+
+---
+
+## 13. Correction: current 0 % implementation (1.2+, current in 1.4.2)
+
+The early sections describe 0 % as writing the negative
+`HIDTrackpadAcceleration` sentinel (§1, §8 step 5, §11). That was superseded
+when the Speed control landed in 1.2 and is not what the shipping app does: it
+never writes a negative value. 0 % installs a constant-gain per-service user
+curve (`UserPointerAccelCurvesKey`, `GainLinear = Speed`, all other coefficients
+0) and writes the original positive parameter value back so the filter enables
+the curve. 1–99 % installs the blended curve from §4, and 100 % with Speed at
+1× clears the per-service override again. The 0.5×–6× range and 3× default in
+§12 are historical too: 1.3/1.4 settled on 0.5×–2× with 1.5× in the middle.
+Table-only mice use the index-scaling route at intermediate amounts, where the
+Speed control is inert.

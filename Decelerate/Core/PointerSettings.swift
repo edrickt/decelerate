@@ -100,7 +100,10 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let amount = try container.decodeIfPresent(Double.self, forKey: .accelerationAmount) {
-            accelerationAmount = amount
+            // Values written by a future/buggy build must never reach the HID
+            // path or the sliders out of range; the Speed decoder already
+            // clamps for the same reason.
+            accelerationAmount = min(max(amount, 0), 1)
         } else if let removed = try container.decodeIfPresent(Bool.self, forKey: .removeAcceleration) {
             // Version 1.0 stored a boolean; true meant "fully linear".
             accelerationAmount = removed ? 0 : 1

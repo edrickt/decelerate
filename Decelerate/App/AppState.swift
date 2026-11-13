@@ -78,7 +78,10 @@ final class AppState: ObservableObject {
         NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
 
         controller.startMonitoring { [weak self] in
-            Task { @MainActor in self?.refreshDevices() }
+            Task { @MainActor in
+                self?.refreshDevices()
+                self?.refreshStatus()
+            }
         }
 
         refreshDevices()
@@ -196,6 +199,13 @@ final class AppState: ObservableObject {
 
     func reapply() {
         controller.apply(preferences)
+        refreshStatus()
+    }
+
+    /// Pulls the controller's error (if any) back into the observable status.
+    /// Retries run after `apply` returns, so the controller calls back here when
+    /// a retry series ends, and that is when a deferred failure becomes visible.
+    private func refreshStatus() {
         lastError = controller.lastError
         if let error = lastError {
             status = .failed(error)
@@ -209,6 +219,10 @@ final class AppState: ObservableObject {
         var updated = preferences
         for pointerClass in PointerClass.allCases {
             updated[pointerClass]?.accelerationAmount = AccelerationController.nativeAcceleration
+            // A Speed other than 1x is still a Decelerate curve override, so
+            // restoring the system also has to drop it. Otherwise a scaled copy
+            // of the macOS curve stays installed after the "restored" state.
+            updated[pointerClass]?.speedMultiplier = 1.0
         }
         preferences = updated
         store.save(updated)

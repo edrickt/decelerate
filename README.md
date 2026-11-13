@@ -8,8 +8,8 @@ and 1.5× speed.
 
 Decelerate does not intercept events, load kernel extensions, request
 accessibility permissions, or add latency. It works inside macOS's HID event
-system. It either removes the acceleration curve entirely or feeds the system a
-blended one.
+system. It installs its own flat or blended acceleration curve there, or steps
+out of the way at 100%.
 
 ![Decelerate menu bar panel](docs/panel.png)
 
@@ -26,25 +26,31 @@ for each device class:
 
 ## How it works
 
-macOS keeps per-class pointer acceleration gains in the HID system's
+macOS keeps per-class pointer acceleration values in the HID system's
 system-wide parameter dictionary (`HIDTrackpadAcceleration`,
-`HIDMouseAcceleration`, …) as IOFixed 16.16 numbers. A negative value is a
-sentinel: Apple's `IOHIDPointerScrollFilter` returns before installing any
-accelerator, and the raw HID deltas reach the pointer unchanged. That is exact
-1:1 movement.
+`HIDMouseAcceleration`, …) as IOFixed 16.16 numbers, and the HID filter reads
+them to select or scale each device's acceleration curve. On top of that,
+`IOHIDPointerScrollFilter` caches per-service acceleration curves, including the
+user curve override (`UserPointerAccelCurvesKey`) that Decelerate installs.
 
-Decelerate writes that sentinel through the public IOHIDSystem parameter
+At 0% Decelerate installs a constant-gain user curve, so pointer deltas are
+multiplied by the Speed setting and nothing else: exact linear movement. For
+amounts between 0% and 100% it installs a blended curve derived from the
+device's own macOS curve (gain(v) is interpolated toward 1.0). At 100% with
+Speed at 1× it clears the override again so macOS's own curve applies. In every
+case it writes the original positive parameter value back so acceleration stays
+enabled for the curve to take effect.
+
+Decelerate writes those parameters through the public IOHIDSystem parameter
 connection (`IOServiceOpen(…, kIOHIDParamConnectType, …)` +
 `IOHIDSetCFTypeParameter`), the same mechanism macOS uses for its own pointer
 settings. It needs no root, no entitlements and no TCC permission, and it adds
 zero overhead to the input path because nothing is intercepted.
 
-For amounts between 0% and 100%, Decelerate delivers the HID filter a blended
-acceleration curve derived from the device's own macOS curve (gain(v) is
-interpolated toward 1.0). The filter caches that curve per pointer service.
 Devices whose acceleration comes from a classic lookup table (most third-party
-mice) instead use the table's built-in linear interpolation by scaling the
-acceleration index. Again, nothing is intercepted.
+mice) do not expose curves; at intermediate amounts Decelerate uses the table's
+built-in linear interpolation by scaling the acceleration index instead. Again,
+nothing is intercepted.
 
 Decelerate snapshots the original values before the first write and restores
 them when the feature is switched off or the app quits, so macOS is never left
@@ -60,7 +66,8 @@ patched.
 - For mice whose acceleration comes from the classic lookup table rather than a
   parametric curve, Decelerate scales the macOS acceleration index instead.
   That is the table's own linear interpolation between identity and full
-  acceleration.
+  acceleration. The Speed control cannot be applied on that path, so for those
+  mice it only takes effect at 0%, where the constant-gain curve is installed.
 - Scroll acceleration is untouched. It is a separate HID parameter.
 - Decelerate re-applies its state if macOS rewrites the parameter, for example
   when you move the Tracking speed slider, after sleep, and when a device is
@@ -141,6 +148,7 @@ Debug launch flags (development only):
 Decelerate.app/Contents/MacOS/Decelerate --preview-panel      # open the panel in a normal window
 Decelerate.app/Contents/MacOS/Decelerate --preview-settings   # open Settings in a normal window
 Decelerate.app/Contents/MacOS/Decelerate --quit-after 5       # quit cleanly after 5 s (QA)
+Decelerate.app/Contents/MacOS/Decelerate --restore-defaults   # run Restore System Defaults after 2 s (QA)
 ```
 
 Diagnostics while developing:

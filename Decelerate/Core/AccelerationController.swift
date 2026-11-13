@@ -3,15 +3,18 @@ import Foundation
 
 /// Owns every interaction with macOS pointer acceleration.
 ///
-/// Mechanism (verified on macOS 26, see `Notes/acceleration-research.md`):
-/// pointer acceleration is applied by Apple's `IOHIDPointerScrollFilter` from
-/// system-wide parameters. A negative IOFixed value disables acceleration
-/// entirely (raw deltas pass through = exact 1:1). For intermediate amounts
-/// Decelerate feeds the filter a blended acceleration curve per pointer
-/// service: the device's own macOS curve interpolated toward the identity line.
-/// The filter caches those user curves per service and rebuilds its accelerator
-/// from them. Nothing is intercepted, no TCC permission is needed and no
-/// latency is added.
+/// Mechanism (verified on macOS 26, see `Notes/acceleration-research.md` and
+/// `Notes/acceleration-amount-research.md`): pointer acceleration is applied by
+/// Apple's `IOHIDPointerScrollFilter` from system-wide parameters and per-service
+/// curves. At 0% Decelerate installs a constant-gain user curve per pointer
+/// service (`UserPointerAccelCurvesKey`), so raw deltas are multiplied by the
+/// chosen speed and nothing else. For intermediate amounts it installs the
+/// device's own macOS curve interpolated toward the identity line, and at 100%
+/// (with Speed at 1x) it clears the override so the filter uses macOS's own
+/// curve. The original positive parameter values are written back so the filter
+/// keeps acceleration enabled and the curve in effect. The filter caches those
+/// user curves per service and rebuilds its accelerator from them. Nothing is
+/// intercepted, no TCC permission is needed and no latency is added.
 ///
 /// Devices that only have a classic acceleration table (most third-party
 /// mice) use the table's own linear interpolation between "identity" and
@@ -70,8 +73,6 @@ final class AccelerationController {
     private var desired: [PointerClass: CategoryPreferences] = [:]
     /// Original IOFixed acceleration values per parameter key.
     private var originals: [String: Int32] = [:]
-    /// Services that currently carry a Decelerate curve override.
-    private var overriddenServices: Set<UInt64> = []
     /// Values written by this controller (persisted), so its own writes are not
     /// mistaken for external changes or for the user's original setting.
     private var lastWritten: [String: Int32] = [:]
@@ -189,8 +190,8 @@ final class AccelerationController {
 
     private static func fallbackValue(forKey key: String) -> Int32 {
         key == HIDPropertyKey.trackpadAcceleration
-            ? HIDPropertyKey.trackpadFallback
-            : HIDPropertyKey.mouseFallback
+            ? HIDPointerParameter.trackpadFallback
+            : HIDPointerParameter.mouseFallback
     }
 
     private static func pointerClass(for service: HIDPointerService) -> PointerClass {
@@ -203,13 +204,16 @@ final class AccelerationController {
         scanner.devices()
     }
 
+    /// Starts observing devices, HID parameters and sleep/wake. `onChange` is
+    /// called after the state may have changed (device attach/removal, wake, or
+    /// the end of a retry series) so the UI can refresh devices and status.
     func startMonitoring(onChange: @escaping () -> Void) {
         changeHandler = onChange
         scanner.startMonitoring { [weak self] in
             OnMain.run {
                 guard let self else { return }
-                self.changeHandler?()
                 self.reapplyAfterEnvironmentChange(retryMissingDevices: false)
+                self.changeHandler?()
             }
         }
         parameters.startObserving(keys: Self.managedKeys) { [weak self] key, raw in
@@ -227,8 +231,8 @@ final class AccelerationController {
                 OnMain.run {
                     guard let self else { return }
                     DebugLog.write("environment: \(name.rawValue)")
-                    self.changeHandler?()
                     self.reapplyAfterEnvironmentChange(retryMissingDevices: true)
+                    self.changeHandler?()
                 }
             }
             wakeObservers.append(observer)
@@ -294,7 +298,11 @@ final class AccelerationController {
         isFinalRetryAttempt = retryAttempt >= Self.retryDelays.count
         let needsRetry = performApply()
         guard needsRetry else {
+            let wasRetrying = retryAttempt > 0
             cancelRetries()
+            // A retry series can end successfully after an earlier attempt
+            // reported a failure; let the UI drop the stale error.
+            if wasRetrying { changeHandler?() }
             return
         }
         guard retryAttempt < Self.retryDelays.count else {
@@ -302,6 +310,13 @@ final class AccelerationController {
             retryWorkItem?.cancel()
             retryWorkItem = nil
             retryMissingClasses = []
+            // An unresolved route only reports itself through `needsRetry`, so
+            // with the retry window closed it is a real failure the UI has not
+            // seen yet. Surface it instead of silently leaving macOS in charge.
+            if lastError == nil {
+                lastError = "Pointer acceleration could not be applied to a connected device."
+            }
+            changeHandler?()
             return
         }
         let delay = Self.retryDelays[retryAttempt]
@@ -332,6 +347,13 @@ final class AccelerationController {
         guard !desired.isEmpty else { return false }
         guard parameters.isAvailable else {
             lastError = "The HID system is unavailable on this Mac."
+            return true
+        }
+        guard bridge.isAvailable else {
+            // Without the full event-system client the per-service curves can
+            // never be installed or cleared, so report the failure instead of
+            // pretending the settings were applied.
+            lastError = "The HID event system is unavailable on this Mac."
             return true
         }
         captureOriginalsIfNeeded()
@@ -401,9 +423,6 @@ final class AccelerationController {
                         rejected = true
                         needsRetry = true
                     }
-                    if !clearOverrides(on: classServices, except: classServices.map(\.registryID)) {
-                        rejected = true
-                    }
                 }
                 // Curves only take effect while acceleration itself is enabled.
                 for key in keys {
@@ -456,11 +475,6 @@ final class AccelerationController {
 
         classesWithServices = observedClasses
 
-        // Registry IDs never come back, so overrides recorded for services that
-        // detached (or were recreated by a wake) can never be cleared again.
-        // Keeping them would only grow the set across every wake and attach.
-        overriddenServices.formIntersection(Set(services.map(\.registryID)))
-
         persistOriginals()
         lastError = rejected ? "macOS rejected a pointer acceleration setting." : nil
         if rejected {
@@ -476,23 +490,35 @@ final class AccelerationController {
         // A wake notification can be missed, so never restore through possibly
         // stale connections.
         parameters.forceReopen()
-        guard parameters.isAvailable else { return }
         bridge.refresh()
-        let services = bridge.pointerServices()
-        overriddenServices.formUnion(services.map(\.registryID))
         var rejected = false
+        // Clear the per-service user curves through the event system first; that
+        // path does not need the IOHIDSystem parameter connection, so a failed
+        // parameter reopen cannot leave the pointer shaped.
+        let services = bridge.pointerServices()
         for service in services {
             if !clearOverrides(on: [service]) { rejected = true }
         }
-        overriddenServices.removeAll()
-        for key in Self.managedKeys {
-            if !write(key, originalValue(forKey: key)) { rejected = true }
+        if parameters.isAvailable {
+            for key in Self.managedKeys {
+                if !write(key, originalValue(forKey: key)) { rejected = true }
+            }
+        } else {
+            rejected = true
+        }
+        lastError = rejected ? "Could not restore the original pointer acceleration." : nil
+        guard !rejected else {
+            // The Mac may still be patched, so the snapshot is the only data
+            // that can repair it. Keep it (and the last-written marks that stop
+            // it being mistaken for the user's original) for the next launch.
+            persistOriginals()
+            persistWrites()
+            return
         }
         originals.removeAll()
         lastWritten.removeAll()
         persistOriginals()
         persistWrites()
-        lastError = rejected ? "Could not restore the original pointer acceleration." : nil
     }
 
     // MARK: - Routing
@@ -524,9 +550,7 @@ final class AccelerationController {
         for service in services {
             guard let curves = service.nativeCurves, !curves.isEmpty else { continue }
             let blended = AccelerationCurveBuilder.curves(curves, factor: amount, speed: speed)
-            if bridge.setCurves(blended, on: service.ref) {
-                overriddenServices.insert(service.registryID)
-            } else {
+            if !bridge.setCurves(blended, on: service.ref) {
                 ok = false
             }
         }
@@ -542,25 +566,26 @@ final class AccelerationController {
         for service in services {
             let source = service.nativeCurves ?? [[HIDCurveKey.index: 0]]
             let constant = AccelerationCurveBuilder.curves(source, factor: 0, speed: speed)
-            if bridge.setCurves(constant, on: service.ref) {
-                overriddenServices.insert(service.registryID)
-            } else {
+            if !bridge.setCurves(constant, on: service.ref) {
                 ok = false
             }
         }
         return ok
     }
 
-    /// Removes Decelerate's curve overrides, optionally keeping some services.
-    private func clearOverrides(on services: [HIDPointerService], except keep: [UInt64] = []) -> Bool {
-        guard !services.isEmpty else { return true }
+    /// Removes Decelerate's per-service curve override, if any.
+    ///
+    /// `UserPointerAccelCurvesKey` is write-only, so there is no way to read
+    /// back whether a service still carries an override: the in-memory tracking
+    /// that used to gate this call is lost on an abnormal exit, and a user curve
+    /// cached in WindowServer would then keep shaping the pointer while the app
+    /// reports macOS's native curve. Clearing unconditionally is a no-op for the
+    /// filter when no override is installed, so it is the safe default.
+    private func clearOverrides(on services: [HIDPointerService]) -> Bool {
         var ok = true
-        let keepSet = Set(keep)
-        for service in services
-        where overriddenServices.contains(service.registryID) && !keepSet.contains(service.registryID) {
+        for service in services {
             if !bridge.clearCurves(on: service.ref) { ok = false }
             if !bridge.setAlgorithmOverride(AlgorithmOverride.native, on: service.ref) { ok = false }
-            overriddenServices.remove(service.registryID)
         }
         return ok
     }

@@ -4,32 +4,18 @@ import IOKit.hidsystem
 
 /// Pointer-acceleration parameters of the HID system.
 ///
-/// Values are IOFixed (16.16 fixed point). A negative value has a special
-/// meaning: Apple's `IOHIDPointerScrollFilter` returns before installing any
-/// accelerator, so raw HID deltas reach the pointer unchanged. That is exact
-/// 1:1 linear movement, the macOS equivalent of Windows "Enhance pointer
-/// precision" off.
+/// Values are IOFixed (16.16 fixed point). Decelerate reads the user's values
+/// and restores them exactly; its own shaping happens through per-service user
+/// curves, so it never writes the negative "acceleration disabled" sentinel that
+/// `Notes/acceleration-research.md` documents (0% is a constant-gain curve).
 enum HIDPointerParameter {
-    /// Trackpad acceleration (`HIDPointerAccelerationType` is
-    /// `HIDTrackpadAcceleration` on Apple trackpads).
-    static let trackpadKey = "HIDTrackpadAcceleration"
-    /// Mouse acceleration.
-    static let mouseKey = "HIDMouseAcceleration"
     /// Generic fallback used by devices without a type-specific key.
     static let pointerKey = "HIDPointerAcceleration"
 
-    /// The sentinel that disables acceleration: IOFixed -1.0.
-    static let disabledRaw: Int32 = -65_536
-
     /// Values to fall back to if the user's original setting cannot be
-    /// recovered (e.g. a previous run was killed while the parameter was
-    /// disabled and no snapshot survived).
+    /// recovered (e.g. a previous run was killed and no snapshot survived).
     static let trackpadFallback: Int32 = 131_072  // 2.0
     static let mouseFallback: Int32 = 45_056      // 0.6875
-
-    static func fixedString(_ raw: Int32) -> String {
-        String(format: "%.3f", Double(raw) / 65_536.0)
-    }
 }
 
 /// Reads and writes the HID system's system-wide pointer parameters, and

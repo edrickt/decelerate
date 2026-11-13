@@ -31,11 +31,6 @@ enum HIDPropertyKey {
     static let transport = "Transport"
     static let builtIn = "BuiltIn"
 
-    /// IOFixed -1.0: acceleration and sensitivity disabled (raw passthrough).
-    static let disabledRaw: Int32 = -65_536
-    static let trackpadFallback: Int32 = 131_072  // 2.0
-    static let mouseFallback: Int32 = 45_056      // 0.6875
-
     static func fixedString(_ raw: Int32) -> String {
         String(format: "%.3f", Double(raw) / 65_536.0)
     }
@@ -205,11 +200,6 @@ final class HIDServiceBridge {
     func clearCurves(on service: IOHIDServiceClient) -> Bool {
         // An empty array makes the filter fall back to the device's own curves.
         IOHIDServiceClientSetProperty(service, HIDPropertyKey.userCurves as CFString, [] as CFArray)
-    }
-
-    @discardableResult
-    func setTable(_ data: Data, on service: IOHIDServiceClient) -> Bool {
-        IOHIDServiceClientSetProperty(service, HIDPropertyKey.accelerationTable as CFString, data as CFData)
     }
 
     @discardableResult

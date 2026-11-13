@@ -5,9 +5,10 @@ Mac (macOS 26.0.1, build 25A362, Apple silicon). Build with `./build.sh`.
 
 ## The short version
 
-The app needs no root, no TCC permission, no entitlement. It disables pointer
-acceleration (true 1:1 movement) by writing a negative IOFixed value into IOHIDSystem's
-global parameter dictionary, using the public (deprecated) `IOHIDParamConnectType` API:
+The app needs no root, no TCC permission, no entitlement. The original research
+disabled pointer acceleration (true 1:1 movement) by writing a negative IOFixed
+value into IOHIDSystem's global parameter dictionary, using the public
+(deprecated) `IOHIDParamConnectType` API:
 
 ```swift
 let service = IORegistryEntryFromPath(kIOMainPortDefault, "IOService:/IOResources/IOHIDSystem")
@@ -20,7 +21,11 @@ IOHIDSetCFTypeParameter(handle, "HIDMouseAcceleration"    as CFString, NSNumber(
 // restore: the values read with IOHIDCopyCFTypeParameter before disabling
 ```
 
-`PointerAccelerationController.swift` is the compiling drop-in implementation.
+`PointerAccelerationController.swift` is the historical compiling drop-in from
+the original (v1) sentinel design; the shipping app no longer writes negative
+values (0 % installs a constant-gain user curve instead, see
+`../../Notes/acceleration-amount-research.md` §13). Its snapshot/restore and
+`IOHIDParamConnectType` mechanics remain the reference for the parameter layer.
 `HIDUseLinearScalingMouseAcceleration = 1` is mouse-only and a no-op for the
 built-in trackpad, so do not use it for the trackpad.
 

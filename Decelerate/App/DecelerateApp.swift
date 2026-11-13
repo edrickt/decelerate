@@ -51,8 +51,10 @@ enum SettingsPresenter {
     }
 
     private static func activateNow() {
-        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-        NSApp.activate(ignoringOtherApps: true)
+        // `ignoringOtherApps` is deprecated and ignored since macOS 14; a plain
+        // activate plus an explicit order-front has the same effect.
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        NSApp.activate()
         // The menu bar panel itself is a non-main window (canBecomeMain == false),
         // so this only raises the Settings window.
         for window in NSApp.windows where window.isVisible && window.canBecomeMain {
@@ -85,9 +87,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     //   Decelerate.app/Contents/MacOS/Decelerate --preview-panel
     //   Decelerate.app/Contents/MacOS/Decelerate --preview-settings
     //   Decelerate.app/Contents/MacOS/Decelerate --show-settings
+    //   Decelerate.app/Contents/MacOS/Decelerate --restore-defaults
 
     private func handleDebugArguments() {
         let arguments = CommandLine.arguments
+        // QA hook: exercise the Settings "Restore System Defaults" action from a
+        // script, so its restore path can be verified like the quit path.
+        if arguments.contains("--restore-defaults") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                DebugLog.write("restore-defaults: invoking AppState.restoreSystemDefaults")
+                AppState.shared.restoreSystemDefaults()
+            }
+        }
         // QA hook: terminate cleanly after N seconds so the restore-on-quit
         // path can be exercised from a script.
         if let index = arguments.firstIndex(of: "--quit-after"), index + 1 < arguments.count,

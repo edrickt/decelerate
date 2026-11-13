@@ -87,7 +87,7 @@ private struct GeneralSettingsTab: View {
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("Decelerate will return pointer acceleration to the macOS default and put your Mac's pointer settings back the way they were before Decelerate started.")
+                    Text("Decelerate will return pointer acceleration to the macOS default, reset the Speed controls to 1×, and put your Mac's pointer settings back the way they were before Decelerate started.")
                 }
             } footer: {
                 Text("Use this to return to the system's standard pointer acceleration.")
@@ -188,7 +188,7 @@ private struct AboutSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 DisclosureGroup("How it works", isExpanded: $isShowingHowItWorks) {
-                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% passes raw pointer deltas straight through for exact 1:1 movement, 100% is macOS's own acceleration curve, and intermediate values mix the two. A separate Speed control (0.5×–2×, with 1.5× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
+                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% replaces the acceleration curve with a flat gain so movement stays linear and only the Speed control scales it, 100% is macOS's own acceleration curve, and intermediate values mix the two. A separate Speed control (0.5×–2×, with 1.5× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

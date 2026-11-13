@@ -7,10 +7,10 @@ Maintenance: after adding, moving, or deleting a source file, update the File in
 ## Orientation
 
 - Menu-bar-only app (`LSUIElement`) that reduces pointer acceleration per device class, trackpad and mouse. 0% is 1:1 movement, 100% is macOS's own curve, values in between blend the two inside the HID pipeline.
-- Entry and lifecycle: `Decelerate/App/DecelerateApp.swift:6` builds the `MenuBarExtra` and `Settings` scenes; its `AppDelegate` at `Decelerate/App/DecelerateApp.swift:65` starts the model, handles dev/QA launch flags, and restores on terminate.
+- Entry and lifecycle: `Decelerate/App/DecelerateApp.swift:6` builds the `MenuBarExtra` and `Settings` scenes; its `AppDelegate` at `Decelerate/App/DecelerateApp.swift:67` starts the model, handles dev/QA launch flags, and restores on terminate.
 - Single observable model: `Decelerate/App/AppState.swift:10` (`@MainActor`). Views own no state; all settings changes and HID actions go through it.
-- Core engine: `Decelerate/Core/AccelerationController.swift:31` (`@MainActor`) snapshots originals, chooses a route per pointer class, installs curves or scales parameters, retries after wake/attach, and restores on quit.
-- Two HID write paths: `Decelerate/Core/HIDPointerControl.swift:48` (IOHIDSystem parameter dictionary) and `Decelerate/Core/HIDServiceBridge.swift:87` (per-service event-system curves and properties). Blend math is isolated in `Decelerate/Core/AccelerationCurveBuilder.swift:31`.
+- Core engine: `Decelerate/Core/AccelerationController.swift:34` (`@MainActor`) snapshots originals, chooses a route per pointer class, installs curves or scales parameters, retries after wake/attach, and restores on quit.
+- Two HID write paths: `Decelerate/Core/HIDPointerControl.swift:34` (IOHIDSystem parameter dictionary) and `Decelerate/Core/HIDServiceBridge.swift:82` (per-service event-system curves and properties). Blend math is isolated in `Decelerate/Core/AccelerationCurveBuilder.swift:31`.
 - Domain docs: no CONTEXT, GLOSSARY or ADR files. The mechanism research is `Notes/acceleration-research.md`; the continuous-amount derivation is `Notes/acceleration-amount-research.md`. Read them only when changing the apply path or curve constants.
 - Generated, not source: `build/`, `build-ui/`, `dist/`, `Tools/Probe/bin/`, `Tools/Probe/out/`.
 
@@ -33,21 +33,21 @@ Maintenance: after adding, moving, or deleting a source file, update the File in
 |---|---|
 | Menu bar panel | `Decelerate/UI/MenuBarPanel.swift:8`; cards and controls in `Decelerate/UI/Components/PointerClassCard.swift:10` |
 | Settings window and tabs | `Decelerate/UI/SettingsView.swift:8` (General, Devices, About tabs in the same file) |
-| Global state and user actions | `Decelerate/App/AppState.swift:10`; setters at `:155`, `:162`, `:170`, `:179` |
-| Applying the current settings | `Decelerate/Core/AccelerationController.swift:263`; `performApply` at `:331` |
-| Restore on quit | `Decelerate/App/DecelerateApp.swift:73` to `Decelerate/App/AppState.swift:93` to `Decelerate/Core/AccelerationController.swift:241` and `:474` |
-| Restore macOS defaults button | `Decelerate/App/AppState.swift:207` |
-| Wake / device-attach re-apply | `Decelerate/Core/AccelerationController.swift:206`, `:221`, `:281` |
-| HID parameter read and write | `Decelerate/Core/HIDPointerControl.swift:94` (`readRaw`), `:109` (`writeRaw`), `:141` (`openParameterConnection`) |
-| Connection reopen after wake | `Decelerate/Core/HIDPointerControl.swift:121` (`reopenIfNeeded`), `:132` (`forceReopen`) |
-| Per-service user curves | `Decelerate/Core/HIDServiceBridge.swift:118` (`pointerServices`), `:188` (`setCurves`), `:205` (`clearCurves`) |
+| Global state and user actions | `Decelerate/App/AppState.swift:10`; setters at `:158`, `:165`, `:173`, `:182` |
+| Applying the current settings | `Decelerate/Core/AccelerationController.swift:267`; `performApply` at `:346` |
+| Restore on quit | `Decelerate/App/DecelerateApp.swift:75` to `Decelerate/App/AppState.swift:96` to `Decelerate/Core/AccelerationController.swift:245` and `:488` |
+| Restore macOS defaults button | `Decelerate/App/AppState.swift:217` |
+| Wake / device-attach re-apply | `Decelerate/Core/AccelerationController.swift:210`, `:225`, `:285` |
+| HID parameter read and write | `Decelerate/Core/HIDPointerControl.swift:80` (`readRaw`), `:95` (`writeRaw`), `:127` (`openParameterConnection`) |
+| Connection reopen after wake | `Decelerate/Core/HIDPointerControl.swift:107` (`reopenIfNeeded`), `:118` (`forceReopen`) |
+| Per-service user curves | `Decelerate/Core/HIDServiceBridge.swift:113` (`pointerServices`), `:183` (`setCurves`), `:200` (`clearCurves`) |
 | Curve blend and speed math | `Decelerate/Core/AccelerationCurveBuilder.swift:39`; source-derived model in `Tools/Probe/curve_math.py` |
 | Pointer classes, speed scale, defaults | `Decelerate/Core/PointerSettings.swift:9`, `:41`, `:68` |
 | Preference keys and HID snapshots | `Decelerate/Core/PreferencesStore.swift:8` |
 | Device list for the UI | `Decelerate/Core/HIDDeviceScanner.swift:10`, `Decelerate/Core/PointerDevice.swift:8` |
 | Debug logging | `Decelerate/Core/DebugLog.swift:7` (enable with `DECELERATE_DEBUG=1`) |
-| Dev and QA launch flags | `Decelerate/App/DecelerateApp.swift:89` (`handleDebugArguments`) |
-| Launch at login | `Decelerate/App/AppState.swift:224` (`SMAppService`) |
+| Dev and QA launch flags | `Decelerate/App/DecelerateApp.swift:92` (`handleDebugArguments`) |
+| Launch at login | `Decelerate/App/AppState.swift:238` (`SMAppService`) |
 | Status pill text | `Decelerate/UI/Components/StatusBadge.swift:7`; `AppState.statusPillLabel` extension at `:54` |
 | Build and install | `Scripts/build.sh`, `Scripts/install.sh` |
 | HID probes | `Tools/Probe/check-state.py`, `Tools/Probe/filterlog.sh`, `Tools/Probe/hidprobe.swift` |
@@ -89,14 +89,14 @@ The real verification path is build plus a manual run plus the research probes:
 
 ## Gotchas
 
-- The README and `Tools/Probe/README.md` say 0% writes a negative IOFixed sentinel. The shipping code does not: for 0% it installs constant-gain user curves and re-enables the parameter (`Decelerate/Core/AccelerationController.swift:373`); the sentinel constants `disabledRaw` exist but are unused (`Decelerate/Core/HIDPointerControl.swift:22`). Trust the code when editing the apply path.
-- `UserPointerAccelCurvesKey` is write-only: copying it back returns nil even in the writing process (`Decelerate/Core/HIDServiceBridge.swift:197`). Verify installed curves with `./Tools/Probe/filterlog.sh`, not by read-back.
+- The negative-IOFixed sentinel described in `Notes/acceleration-research.md` and `Tools/Probe/PointerAccelerationController.swift` is the original research path; the shipping app never writes it (see `Notes/acceleration-amount-research.md` §13). For 0% it installs constant-gain user curves and writes the original positive parameter back (`Decelerate/Core/AccelerationController.swift:395`). Trust the code when editing the apply path.
+- `UserPointerAccelCurvesKey` is write-only: copying it back returns nil even in the writing process (`Decelerate/Core/HIDServiceBridge.swift:192`). Verify installed curves with `./Tools/Probe/filterlog.sh`, not by read-back.
 - `AppState` and `AccelerationController` are `@MainActor`; cross-thread work is bounced by the private `OnMain` helper in `Decelerate/Core/AccelerationController.swift`. Do not call the controller from a background context.
-- Apply is deliberately retried: `retryDelays` at `Decelerate/Core/AccelerationController.swift:89` totals about 18 seconds after wake or attach, so a temporarily missing pointer class is not a bug.
-- The snapshot protects itself: `lastWritten` values are never mistaken for the user's original, and `com.apple.*.scaling` defaults are treated as ground truth (`Decelerate/Core/AccelerationController.swift:146`, `:592`). Removing that logic can corrupt the restore.
+- Apply is deliberately retried: `retryDelays` at `Decelerate/Core/AccelerationController.swift:90` totals about 18 seconds after wake or attach, so a temporarily missing pointer class is not a bug.
+- The snapshot protects itself: `lastWritten` values are never mistaken for the user's original, and `com.apple.*.scaling` defaults are treated as ground truth (`Decelerate/Core/AccelerationController.swift:125`, `:617`). Removing that logic can corrupt the restore.
 - The app must stay non-sandboxed, hardened-runtime off, ad-hoc signed (`CODE_SIGN_IDENTITY = "-"` at `Decelerate.xcodeproj/project.pbxproj:257`; `ENABLE_APP_SANDBOX = NO` and `ENABLE_HARDENED_RUNTIME = NO` follow in the same build-settings block). Sandboxing or notarization changes can break the IOHIDSystem parameter connection.
 - The Xcode project uses a filesystem-synchronized root group for `Decelerate/` (`Decelerate.xcodeproj/project.pbxproj:14`): new Swift files under that tree build automatically, but files added outside it require project edits.
-- No event tap, root prompt, TCC API or entitlement file exists anywhere in `Decelerate/`; the permission stubs at `Decelerate/Core/AccelerationController.swift:662` always report "no permission needed". Do not add a permission UI on the assumption one is required.
+- No event tap, root prompt, TCC API or entitlement file exists anywhere in `Decelerate/`; the permission stubs at `Decelerate/Core/AccelerationController.swift:687` always report "no permission needed". Do not add a permission UI on the assumption one is required.
 
 ## File index
 
