@@ -130,7 +130,11 @@ final class AppState: ObservableObject {
             let speed = category.speedMultiplier
             let speedText = String(format: "%.1f×", speed)
             if category.accelerationAmount <= 0.005 {
-                return "\(pointerClass.title) 1:1 · \(speedText)"
+                // "1:1" only when Speed does not scale the linear movement;
+                // otherwise the card says "linear movement" and this row must
+                // not make the 1:1 claim the rest of the UI removed.
+                let linearText = abs(speed - 1.0) < 0.01 ? "1:1" : "linear"
+                return "\(pointerClass.title) \(linearText) · \(speedText)"
             }
             return "\(pointerClass.title) \(percent)% · \(speedText)"
         }
