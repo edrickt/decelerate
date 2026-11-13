@@ -66,7 +66,7 @@ called out per finding.
 | 5 | Low | High | `Decelerate/Core/PointerSettings.swift:106` | A decoded `accelerationAmount` was not range-checked while `speedMultiplier` already was. A corrupt, hand-edited or future-build preference outside 0...1 could reach the sliders and the HID routing checks. | Clamp the decoded amount to 0...1 (same rationale as the existing speed clamp). | Injected `{"accelerationAmount":2.0,"speedMultiplier":1.5}` into `pointer.trackpad`: debug log then reports `apply: trackpad amount=1.0 speed=1.5`, i.e. the clamp took effect; the preference domain was restored from the backup afterwards and `check-state.py` confirms parameters restored. |
 | 6 | Low | High | `README.md:27-50` and `:66-70`, `:151`; `Decelerate/UI/SettingsView.swift:191`; `Decelerate/Core/AccelerationController.swift:3-20`; `Decelerate/Core/HIDPointerControl.swift:5-10`; `Decelerate/Core/HIDServiceBridge.swift:32-36`; `Tools/Probe/README.md:8-29`; `Notes/acceleration-amount-research.md:555-570`; `docs/agents/codebase-map.md:92` | Documentation and code comments still described the retired mechanism: 0% was documented as writing the negative IOFixed sentinel / passing raw deltas through, while the shipping code installs a constant-gain user curve and keeps acceleration enabled (and applies the Speed multiplier). The "Speed is inert for table-only mice at intermediate amounts" limitation was undocumented. Two enums also carried dead, duplicated sentinel/fallback constants and an unused `setTable` helper that implied the removed mechanism. | Rewrote the mechanism sections, About copy and class docs; added the table-mouse Speed limitation; appended a "current implementation" correction to the research notes instead of rewriting historical evidence; updated the codebase-map gotcha and line references; removed the dead duplicated constants and unused table-writing helper. | Code/doc cross-check performed for every corrected sentence; full clean Debug and Release builds pass with 0 source warnings. |
 | 7 | Low | High | `Decelerate/App/DecelerateApp.swift:53-64`; former call sites at `:137`, `:192` | `SettingsPresenter.activateNow()` passed the `.activateIgnoringOtherApps` option to `NSRunningApplication.activate(options:)`; that option is deprecated in macOS 14 and ignored there, and a fully clean build surfaced it as the only source warning (incremental builds had masked it). `NSApp.activate(ignoringOtherApps:)` is `API_TO_BE_DEPRECATED` rather than deprecated in macOS 14; the two remaining call sites were still using it. | Use `.activateAllWindows` plus `NSApp.activate()` in `activateNow()` (same effective behaviour on macOS 14+), and replace the two remaining `NSApp.activate(ignoringOtherApps:)` call sites with `NSApp.activate()`. | Fully clean Debug and Release builds (`-derivedDataPath` under `/tmp`) report 0 `*.swift` warnings (previously 1); round-2 `./Scripts/build.sh` Debug and Release also pass with 0 `*.swift` warnings. |
-| 8 | Low | High | `Decelerate/App/AppState.swift:104-141`, `:218-226`; `Decelerate/UI/Components/StatusBadge.swift:3-9`, `:55-76`; `Decelerate/UI/Components/PointerClassCard.swift:45-59` | At 100% acceleration with Speed != 1× the app installs a speed-scaled copy of the macOS curve (see finding 4), but `isEnabled`, `activeSummary`, the status pill and the pointer-card caption still reported "Off"/"macOS default acceleration": a user with a speed override could see the app as not shaping the pointer while it was. Accepted from verification feedback (round 2; initially deferred as item 3). | Count a non-1× Speed as an active override in `isEnabled`; only report "macOS default acceleration" when amounts are native and speeds are 1×; show "Custom" for speed-only overrides ("1:1 Pointer" now requires linear at 1×); pointer cards say "macOS curve at N× speed" or "linear movement" instead of claiming macOS default. | At 100%/1.5×: panel shows the "Custom" pill and "macOS curve at 1.50× speed" captions; Settings General shows Status "Custom" and Mode "Trackpad 100% · 1.5× · Mouse 100% · 1.5×". The normal 34.7%/1.85× + 50%/1.5× state is unaffected (non-native amounts already produced "Custom"). Screenshots captured in session, not committed. |
+| 8 | Low | High | `Decelerate/App/AppState.swift:104-141`, `:218-226`; `Decelerate/UI/Components/StatusBadge.swift:3-9`, `:55-76`; `Decelerate/UI/Components/PointerClassCard.swift:45-59` | At 100% acceleration with Speed != 1× the app installs a speed-scaled copy of the macOS curve (see finding 4), but `isEnabled`, `activeSummary`, the status pill and the pointer-card caption still reported "Off"/"macOS default acceleration": a user with a speed override could see the app as not shaping the pointer while it was. Accepted from verification feedback (round 2; initially deferred as item 3). | Count a non-1× Speed as an active override in `isEnabled`; only report "macOS default acceleration" when amounts are native and speeds are 1×; show "Custom" for speed-only overrides ("1:1 Pointer" now requires linear at 1×); pointer cards say "macOS curve at N× speed" or "linear movement" instead of claiming macOS default; and the Settings "Mode" row says "linear · N×" rather than "1:1 · N×" when Speed is not 1×. | At 100%/1.5×: panel shows the "Custom" pill and "macOS curve at 1.50× speed" captions; Settings General shows Status "Custom" and Mode "Trackpad 100% · 1.5× · Mouse 100% · 1.5×". The normal 34.7%/1.85× + 50%/1.5× state is unaffected (non-native amounts already produced "Custom"). Screenshots captured in session, not committed. |
 
 Final severity counts after round 2: 1 High, 3 Medium, 4 Low (finding 8 was accepted from verification feedback; it was initially deferred as item 3).
 
@@ -84,7 +84,11 @@ Final severity counts after round 2: 1 High, 3 Medium, 4 Low (finding 8 was acce
 | Fully clean Release | `xcodebuild … -configuration Release -derivedDataPath /tmp/dec-audit/derived-release build` | exit 0; 0 `*.swift` warnings |
 
 No new warnings were introduced; the one pre-existing Swift deprecation warning found by the clean
-build was fixed (finding 7).
+build was fixed (finding 7). A fully clean build also prints a deterministic Xcode tool message,
+`appintentsmetadataprocessor … warning: Metadata extraction skipped. No AppIntents.framework
+dependency found.`; it is not a `*.swift` warning (no AppIntents dependency exists), so the
+0-`*.swift`-warning results above stand. The verifier reproduced this tool message deterministically
+in a fully clean Debug build.
 
 ### Controlled runtime checks
 
@@ -189,6 +193,23 @@ unaffected because non-native amounts already produced "Custom".
 | Installed app | the verifier had relaunched the installed app; it was quit again for the single-instance controlled run, then relaunched with `open ~/Applications/Decelerate.app` and left running (its own restore keeps the HID parameters at the values above) |
 | UI state | panel + Settings screenshots at 100%/1.5× (see N3); default user state unchanged |
 
+### Final pre-release items (verifier re-check)
+
+- **Mode-row copy (LOW):** at 0% acceleration with Speed != 1×, `activeSummary` still said
+  "Trackpad 1:1 · 1.5×" while the card said "No acceleration: linear movement". It now says
+  "Trackpad linear · 1.5×" and keeps "1:1" only when Speed is 1×, so card and Mode row agree.
+  Evidence: Settings screenshot at 0%/1.5× (`/tmp/dec-audit/r2-settings-zero-linear.png`, session
+  artifact, not committed) shows Mode "Trackpad linear · 1.5× · Mouse linear · 1.5×"; the panel
+  cards show "No acceleration: linear movement".
+- **Files-changed count corrected:** 14 distinct files (13 modified plus this report); round 2
+  touched 5 files and added `StatusBadge.swift` and `PointerClassCard.swift` to the changed set.
+- **AppIntents tool message:** restored as a deterministic Xcode tool-message footnote (see the
+  build-gates section); it is not a `*.swift` warning, so the 0-`*.swift`-warning results stand.
+
+After these final copy fixes, the Debug and Release `./Scripts/build.sh` gates and the controlled
+`--quit-after 5` run were repeated with the same results: 0 `*.swift` warnings, `check-state.py`
+identical before/after, snapshot cleaned up, and the installed app left running.
+
 ## Deferred items
 
 1. `restoreSystemState()` enumerates services once. If the event system transiently returned no
@@ -212,12 +233,10 @@ unaffected because non-native amounts already produced "Custom".
 6. The historical sections of `Notes/acceleration-research.md` / `Notes/acceleration-amount-research.md`
    that describe the negative sentinel were kept as written research history; the current behaviour
    is recorded in a new correction section (§13) at the end of the amount notes.
-7. The verifier's clean builds did not reproduce the `appintentsmetadataprocessor` message seen once in
-   this environment, so no build-tool warning is claimed; only Swift warnings are reported above.
 
 ## Notes
 
-Files changed across both rounds (12 distinct files, 11 modified plus this new report; round 2 touched 5 of them):
+Files changed across both rounds (14 distinct files: 13 modified plus this new report; round 2 touched 5 of them and added `StatusBadge.swift` and `PointerClassCard.swift` to the set):
 
 - `Decelerate/Core/AccelerationController.swift`: restore snapshot retention and curve clearing
   without the parameter connection (finding 1); unconditional override clearing and removal of the
@@ -227,7 +246,8 @@ Files changed across both rounds (12 distinct files, 11 modified plus this new r
   availability guard (N2).
 - `Decelerate/App/AppState.swift`: `refreshStatus()` used by `reapply` and by controller change
   callbacks (finding 3); Restore System Defaults resets Speed to 1x (finding 4); round 2: the status
-  model counts a non-1x Speed as an active override (finding 8).
+  model counts a non-1x Speed as an active override (finding 8) and the Mode row says
+  "linear · N×" instead of "1:1 · N×" when Speed is not 1x.
 - `Decelerate/UI/Components/StatusBadge.swift`: round 2: status pill logic for speed-only overrides
   (finding 8).
 - `Decelerate/UI/Components/PointerClassCard.swift`: round 2: accurate captions at 100% with a
