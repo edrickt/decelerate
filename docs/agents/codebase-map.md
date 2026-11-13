@@ -1,6 +1,6 @@
 # decelerate codebase map
 
-Verified against `1367ed8b2a9e74d4255007e46a04adb41564cf44` (2026-11-12). Native macOS menu-bar app: Swift 5, SwiftUI plus AppKit, one Xcode project, no package manager or third-party dependencies. Entry point is `Decelerate/App/DecelerateApp.swift` (`@main`). Learn `AccelerationController` first: it owns every system change that controls pointer acceleration, including snapshot and restore.
+Verified against `3c71b721dfdd9f1bd4dae9b38a0c7eaae2844364` (2026-11-12). Native macOS menu-bar app: Swift 5, SwiftUI plus AppKit, one Xcode project, no package manager or third-party dependencies. Entry point is `Decelerate/App/DecelerateApp.swift` (`@main`). Learn `AccelerationController` first: it owns every system change that controls pointer acceleration, including snapshot and restore.
 
 Maintenance: after adding, moving, or deleting a source file, update the File index and bump `Verified against` to the commit you checked.
 
@@ -33,10 +33,10 @@ Maintenance: after adding, moving, or deleting a source file, update the File in
 |---|---|
 | Menu bar panel | `Decelerate/UI/MenuBarPanel.swift:8`; cards and controls in `Decelerate/UI/Components/PointerClassCard.swift:10` |
 | Settings window and tabs | `Decelerate/UI/SettingsView.swift:8` (General, Devices, About tabs in the same file) |
-| Global state and user actions | `Decelerate/App/AppState.swift:10`; setters at `:158`, `:165`, `:173`, `:182` |
+| Global state and user actions | `Decelerate/App/AppState.swift:10`; setters at `:168`, `:175`, `:183`, `:192` |
 | Applying the current settings | `Decelerate/Core/AccelerationController.swift:267`; `performApply` at `:346` |
 | Restore on quit | `Decelerate/App/DecelerateApp.swift:75` to `Decelerate/App/AppState.swift:96` to `Decelerate/Core/AccelerationController.swift:245` and `:488` |
-| Restore macOS defaults button | `Decelerate/App/AppState.swift:217` |
+| Restore macOS defaults button | `Decelerate/App/AppState.swift:227` |
 | Wake / device-attach re-apply | `Decelerate/Core/AccelerationController.swift:210`, `:225`, `:285` |
 | HID parameter read and write | `Decelerate/Core/HIDPointerControl.swift:80` (`readRaw`), `:95` (`writeRaw`), `:127` (`openParameterConnection`) |
 | Connection reopen after wake | `Decelerate/Core/HIDPointerControl.swift:107` (`reopenIfNeeded`), `:118` (`forceReopen`) |
@@ -47,8 +47,8 @@ Maintenance: after adding, moving, or deleting a source file, update the File in
 | Device list for the UI | `Decelerate/Core/HIDDeviceScanner.swift:10`, `Decelerate/Core/PointerDevice.swift:8` |
 | Debug logging | `Decelerate/Core/DebugLog.swift:7` (enable with `DECELERATE_DEBUG=1`) |
 | Dev and QA launch flags | `Decelerate/App/DecelerateApp.swift:92` (`handleDebugArguments`) |
-| Launch at login | `Decelerate/App/AppState.swift:238` (`SMAppService`) |
-| Status pill text | `Decelerate/UI/Components/StatusBadge.swift:7`; `AppState.statusPillLabel` extension at `:54` |
+| Launch at login | `Decelerate/App/AppState.swift:248` (`SMAppService`) |
+| Status pill text | `Decelerate/UI/Components/StatusBadge.swift:7`; `AppState.statusPillLabel` extension at `:55` |
 | Build and install | `Scripts/build.sh`, `Scripts/install.sh` |
 | HID probes | `Tools/Probe/check-state.py`, `Tools/Probe/filterlog.sh`, `Tools/Probe/hidprobe.swift` |
 
@@ -93,10 +93,10 @@ The real verification path is build plus a manual run plus the research probes:
 - `UserPointerAccelCurvesKey` is write-only: copying it back returns nil even in the writing process (`Decelerate/Core/HIDServiceBridge.swift:192`). Verify installed curves with `./Tools/Probe/filterlog.sh`, not by read-back.
 - `AppState` and `AccelerationController` are `@MainActor`; cross-thread work is bounced by the private `OnMain` helper in `Decelerate/Core/AccelerationController.swift`. Do not call the controller from a background context.
 - Apply is deliberately retried: `retryDelays` at `Decelerate/Core/AccelerationController.swift:90` totals about 18 seconds after wake or attach, so a temporarily missing pointer class is not a bug.
-- The snapshot protects itself: `lastWritten` values are never mistaken for the user's original, and `com.apple.*.scaling` defaults are treated as ground truth (`Decelerate/Core/AccelerationController.swift:125`, `:617`). Removing that logic can corrupt the restore.
+- The snapshot protects itself: `lastWritten` values are never mistaken for the user's original, and `com.apple.*.scaling` defaults are treated as ground truth (`Decelerate/Core/AccelerationController.swift:125`, `:636`). Removing that logic can corrupt the restore.
 - The app must stay non-sandboxed, hardened-runtime off, ad-hoc signed (`CODE_SIGN_IDENTITY = "-"` at `Decelerate.xcodeproj/project.pbxproj:257`; `ENABLE_APP_SANDBOX = NO` and `ENABLE_HARDENED_RUNTIME = NO` follow in the same build-settings block). Sandboxing or notarization changes can break the IOHIDSystem parameter connection.
 - The Xcode project uses a filesystem-synchronized root group for `Decelerate/` (`Decelerate.xcodeproj/project.pbxproj:14`): new Swift files under that tree build automatically, but files added outside it require project edits.
-- No event tap, root prompt, TCC API or entitlement file exists anywhere in `Decelerate/`; the permission stubs at `Decelerate/Core/AccelerationController.swift:687` always report "no permission needed". Do not add a permission UI on the assumption one is required.
+- No event tap, root prompt, TCC API or entitlement file exists anywhere in `Decelerate/`; the permission stubs at `Decelerate/Core/AccelerationController.swift:706` always report "no permission needed". Do not add a permission UI on the assumption one is required.
 
 ## File index
 
