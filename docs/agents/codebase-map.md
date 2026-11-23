@@ -1,6 +1,6 @@
 # decelerate codebase map
 
-Verified against `3c71b721dfdd9f1bd4dae9b38a0c7eaae2844364` (2026-11-12). Native macOS menu-bar app: Swift 5, SwiftUI plus AppKit, one Xcode project, no package manager or third-party dependencies. Entry point is `Decelerate/App/DecelerateApp.swift` (`@main`). Learn `AccelerationController` first: it owns every system change that controls pointer acceleration, including snapshot and restore.
+Verified against `ad81fab` (2026-11-23). Native macOS menu-bar app: Swift 5, SwiftUI plus AppKit, one Xcode project, no package manager or third-party dependencies. Entry point is `Decelerate/App/DecelerateApp.swift` (`@main`). Learn `AccelerationController` first: it owns every system change that controls pointer acceleration, including snapshot and restore.
 
 Maintenance: after adding, moving, or deleting a source file, update the File index and bump `Verified against` to the commit you checked.
 
