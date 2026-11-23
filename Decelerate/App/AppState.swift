@@ -104,10 +104,10 @@ final class AppState: ObservableObject {
     /// True when Decelerate is shaping the pointer: either an acceleration
     /// amount is below 100%, or a Speed other than 1x still scales the curve.
     /// A non-1x Speed is a real Decelerate override even at 100% acceleration,
-    /// so it must not be reported as "Off".
+    /// so it must not be reported as "Off". Scroll shaping counts too.
     var isEnabled: Bool {
         preferences.values.contains {
-            !$0.isNative || abs($0.speedMultiplier - 1.0) >= 0.01
+            !$0.isNative || abs($0.speedMultiplier - 1.0) >= 0.01 || !$0.isScrollNative
         }
     }
 
@@ -120,8 +120,8 @@ final class AppState: ObservableObject {
     var activeSummary: String {
         let categories = PointerClass.allCases.map { preferences(for: $0) }
         // "macOS default acceleration" is only true when Speed is not scaling
-        // the macOS curve either.
-        if categories.allSatisfy({ $0.isNative && abs($0.speedMultiplier - 1.0) < 0.01 }) {
+        // the macOS curve either, and scroll is untouched too.
+        if categories.allSatisfy({ $0.isNative && abs($0.speedMultiplier - 1.0) < 0.01 && $0.isScrollNative }) {
             return "macOS default acceleration"
         }
         let parts: [String] = PointerClass.allCases.map { pointerClass in
@@ -138,7 +138,22 @@ final class AppState: ObservableObject {
             }
             return "\(pointerClass.title) \(percent)% · \(speedText)"
         }
-        return parts.joined(separator: " · ")
+        let scrollParts: [String] = PointerClass.allCases.compactMap { pointerClass in
+            let category = preferences(for: pointerClass)
+            guard !category.isScrollNative else { return nil }
+            var text = "\(pointerClass.title) scroll"
+            if category.scrollAccelerationAmount < 0.995 {
+                text += " \(Int((category.scrollAccelerationAmount * 100).rounded()))%"
+            }
+            if abs(category.scrollSpeedMultiplier - 1.0) >= 0.01 {
+                text += String(format: " %.1f×", category.scrollSpeedMultiplier)
+            }
+            if category.invertScroll {
+                text += " inverted"
+            }
+            return text
+        }
+        return (parts + scrollParts).joined(separator: " · ")
     }
 
     var menuBarSymbol: String {
@@ -205,6 +220,31 @@ final class AppState: ObservableObject {
         reapply()
     }
 
+    // MARK: - Scroll preferences
+
+    func setScrollAccelerationAmount(_ amount: Double, for pointerClass: PointerClass) {
+        var value = preferences(for: pointerClass)
+        let clamped = min(max(amount, 0), 1)
+        guard value.scrollAccelerationAmount != clamped else { return }
+        value.scrollAccelerationAmount = clamped
+        setPreferences(value, for: pointerClass)
+    }
+
+    func setScrollSpeedMultiplier(_ speed: Double, for pointerClass: PointerClass) {
+        var value = preferences(for: pointerClass)
+        let clamped = min(max(speed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
+        guard value.scrollSpeedMultiplier != clamped else { return }
+        value.scrollSpeedMultiplier = clamped
+        setPreferences(value, for: pointerClass)
+    }
+
+    func setInvertScroll(_ invert: Bool, for pointerClass: PointerClass) {
+        var value = preferences(for: pointerClass)
+        guard value.invertScroll != invert else { return }
+        value.invertScroll = invert
+        setPreferences(value, for: pointerClass)
+    }
+
     // MARK: - Actions
 
     func refreshDevices() {
@@ -237,6 +277,11 @@ final class AppState: ObservableObject {
             // restoring the system also has to drop it. Otherwise a scaled copy
             // of the macOS curve stays installed after the "restored" state.
             updated[pointerClass]?.speedMultiplier = 1.0
+            // Same for scroll: any shaped scroll curve must go so the restore
+            // really returns to macOS scrolling.
+            updated[pointerClass]?.scrollAccelerationAmount = 1.0
+            updated[pointerClass]?.scrollSpeedMultiplier = 1.0
+            updated[pointerClass]?.invertScroll = false
         }
         preferences = updated
         store.save(updated)
@@ -268,8 +313,39 @@ final class AppState: ObservableObject {
 
     private func syncLaunchAtLoginFromSystem() {
         isApplyingExternalChanges = true
-        launchAtLogin = SMAppService.mainApp.status == .enabled
-        store.launchAtLogin = launchAtLogin
-        isApplyingExternalChanges = false
+        defer { isApplyingExternalChanges = false }
+        if SMAppService.mainApp.status == .enabled {
+            launchAtLogin = true
+            store.launchAtLogin = true
+            return
+        }
+        // A bundle that was moved, re-installed or restored from a backup loses
+        // its login-item registration while the user's intent is still stored.
+        // Silently turning the toggle off would then leave Decelerate not
+        // running after the next login, which reads as "deceleration stopped
+        // working" with no app around to explain it. Re-register instead, but
+        // only from a stable install location so a copy in the build tree never
+        // becomes the login item.
+        if store.launchAtLogin, Self.isInstalledLocation {
+            do {
+                try SMAppService.mainApp.register()
+                launchAtLogin = true
+                store.launchAtLogin = true
+                DebugLog.write("launch-at-login: re-registered after the bundle moved")
+                return
+            } catch {
+                DebugLog.write("launch-at-login: re-register failed: \(error.localizedDescription)")
+            }
+        }
+        launchAtLogin = false
+        // Keep the stored intent when running from an uninstalled copy; a
+        // later install from a stable location should still restore it.
+        if Self.isInstalledLocation { store.launchAtLogin = false }
+    }
+
+    /// True when the running bundle lives where `Scripts/install.sh` puts it.
+    private static var isInstalledLocation: Bool {
+        let path = Bundle.main.bundlePath
+        return path.hasPrefix("/Applications/") || path.hasPrefix(NSHomeDirectory() + "/Applications/")
     }
 }

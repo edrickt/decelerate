@@ -272,6 +272,55 @@ Verified after the fix: `HIDTrackpadAcceleration` = 163840 and
 launch, and both survive the simulated wake path (`--simulate-wake`, a dev-only QA
 flag).
 
+### 5.2 The trackpad service is also replaced while the Mac stays awake (2026-11)
+
+Sleep is not needed for the state to disappear. On a machine that was awake the whole
+time, the built-in trackpad's HID event service was replaced repeatedly (registry IDs
+`4296008696 → 4296010240 → 4296010542 → 4296026479 → 4296026883`, roughly every 2 to 8
+minutes, matching the trackpad waking from its own idle sleep). Each replacement dropped
+`UserPointerAccelCurvesKey` with the old service.
+
+Nothing told the app: the hardware device never went away, so the `IOHIDManager`
+attach/removal callbacks stayed quiet, the HID parameters kept the values Decelerate
+wrote (so no property-change callback fired), and the app was not asleep. The pointer
+silently used macOS's own curve while the UI still reported 25 % deceleration at 1.5x.
+This is the recurring "deceleration and speed stopped working" report.
+
+Filter-log evidence for one cycle (WindowServer, `IOHIDPointerScrollFilter`):
+
+```
+14:32:17.683 [4296026479] Acceleration key:HIDTrackpadAcceleration value:163840 apply:no client:(null)
+14:32:17.726 [4296026479] Pointer acceleration (enabled) HIDTrackpadAcceleration:163840 ... 163840
+14:32:19.358 [4296026479] Acceleration key:UserScrollAccelCurvesKey value:(
+14:32:19.35x [4296026479] Acceleration key:UserPointerAccelCurvesKey value:(  { HIDAccelGainLinear = 98376; ... }
+```
+
+The init burst at `:17` is the new service being created; the writes at `:19` are the
+app healing it 1.7 s later. Note that `UserPointerAccelCurvesKey` reads back as nil even
+on a service that carries a curve, so the service identity (`registryID`) is the only
+usable verification signal; the filter log is the only ground truth for what is attached.
+
+Fix (this build):
+
+- `AccelerationController.verifyAppliedServices` compares the live pointer service
+  registry IDs with the ones the last fully accepted apply shaped, every 2 s, through a
+  freshly created `IOHIDEventSystemClient`, and re-applies on any difference
+  (`heal`). Full client re-creation matters: a long-lived client can keep reporting the
+  dead service. The check is skipped entirely when every setting is native and does no
+  HID writes when the service set is unchanged (measured ~0.1 % CPU).
+- Parameters are written before the curve is installed, in both the pointer and scroll
+  paths. A global parameter write can rebuild the accelerator and drop the per-service
+  cached curve, so a parameter write after the curve install hands the pointer back to
+  macOS.
+- An external parameter change that lands inside the 0.75 s settling window is deferred
+  and re-applied instead of ignored; macOS rewrites these parameters while it creates a
+  service, which is exactly that moment.
+- `Tools/Probe/verify-applied.py` is the regression check: preferences vs. live service
+  IDs vs. the filter log, with exit code 1 for "shaped but not attached".
+
+Verified live: three service replacements were healed 1.0-1.7 s after the new service
+appeared; `verify-applied.py` passes while the app runs and fails when it is quit.
+
 ---
 
 ## 6. Permissions

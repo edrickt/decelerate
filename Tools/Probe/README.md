@@ -36,6 +36,7 @@ built-in trackpad, so do not use it for the trackpad.
 | `PointerAccelerationController.swift` | drop-in controller for the app (param-connect path, snapshot/restore/reapply) |
 | `hidprobe.swift` | research CLI: service enumeration, property dump, per-service writes, event-system-level writes, kernel param reads/writes, TCC checks |
 | `check-state.py` | read-only JSON snapshot: kernel `HIDParameters`, all service mirrors, NSGlobalDomain mouse/trackpad defaults |
+| `verify-applied.py` | read-only regression check: proves the installed user curves are attached to the *live* HID services (see below) |
 | `filterlog.sh` | read-only: live `IOHIDPointerScrollFilter` decisions from WindowServer logs (ground truth for "did the accelerator change") |
 | `tapmeasure.swift` | CGEventTap delta listener + synthetic-event smoke test (for measuring gain with physical input) |
 | `curve_math.py` | source-exact model of Apple's parametric + table accelerators; generates the continuous-amount blend curves, gain tables and fit/error analysis (`--analysis`, `--mouse`). See `../../Notes/acceleration-amount-research.md` |
@@ -47,6 +48,8 @@ built-in trackpad, so do not use it for the trackpad.
 ```bash
 ./build.sh
 ./check-state.py                       # where are the pointer params now?
+./verify-applied.py                    # is the shaping attached to the live HID services?
+bin/hidprobe pointers                  # live pointer services + their registry IDs
 bin/hidprobe param-dump                # kernel-global HID parameters (readable!)
 bin/hidprobe param-set HIDTrackpadAcceleration fixed:-1   # DISABLE (raw -65536 = IOFixed -1.0)
 bin/hidprobe param-set HIDTrackpadAcceleration int:131072 # restore this machine's original 2.0
@@ -56,6 +59,30 @@ bin/hidprobe param-set HIDTrackpadAcceleration int:131072 # restore this machine
 
 Danger-free rule: every `param-set` that changes state has a matching read in
 `param-dump`; capture the original first and restore it immediately (all scripts here do).
+
+## verify-applied.py: the silent-revert regression check
+
+A pointer/scroll curve is written per HID *service* (`UserPointerAccelCurvesKey`)
+and cached by that service's filter instance. macOS replaces pointer services
+without any notification: the built-in trackpad gets a new one every time it
+wakes from idle, sleep/wake does it for every device, and WindowServer
+re-creates them after a session change. The curve is gone with the old service
+while the HID parameters are still exactly what Decelerate wrote, so the pointer
+silently reverts to macOS acceleration and the app still reports the settings as
+applied. Nothing can read the property back, so the only evidence is the
+filter's own log.
+
+`verify-applied.py` compares the app's stored preferences with the live services
+(from `hidprobe pointers`) and the `UserPointerAccelCurvesKey` writes in
+the WindowServer log, taking the *last* event per service: an install after the
+service was created passes, a clear or a write that predates the current service
+fails. Run it whenever the apply path, the HID layer or the wake/attach/watchdog
+triggers change, and after any report of "deceleration stopped working".
+
+Exit codes: `0` attached, `1` a shaping class is not attached to its live
+service, `2` not enough log history (raise `--minutes`). The app itself keeps
+this state healthy with a 2 s watchdog that re-applies as soon as the live
+service set changes; the script is what proves the watchdog is working.
 
 ## Notes / limitations
 

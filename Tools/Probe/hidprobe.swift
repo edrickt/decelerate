@@ -120,6 +120,38 @@ func dumpRegistryProperties(id: UInt64) {
 
 // MARK: - Commands
 
+// One line per pointer service, in the same class terms the app uses:
+// "<class> 0x<registryID> curves=<yes|no> table=<yes|no> product=\"...\"".
+// Consumed by Tools/Probe/verify-applied.py, which checks these IDs against the
+// WindowServer filter log to prove the user curves are still attached to the
+// live service instances.
+func cmdPointers() {
+    guard let create = IOHIDEventSystemClientCreatePtr,
+          let client = create(kCFAllocatorDefault) else {
+        FileHandle.standardError.write(Data("no full event-system client\n".utf8))
+        exit(2)
+    }
+    for svc in services(of: client) {
+        let k = kind(svc)
+        guard k == .mouse || k == .trackpad else { continue }
+        guard let id = registryID(svc), id != 0 else { continue }
+        let accelType = getString(svc, "HIDPointerAccelerationType") ?? ""
+        let pointerClass: String
+        if accelType == "HIDTrackpadAcceleration" {
+            pointerClass = "trackpad"
+        } else if accelType == "HIDMouseAcceleration" {
+            pointerClass = "mouse"
+        } else {
+            pointerClass = k == .trackpad ? "trackpad" : "mouse"
+        }
+        let curves = get(svc, "HIDAccelCurves") != nil ? "yes" : "no"
+        let table = get(svc, "HIDPointerAccelerationTable") != nil ? "yes" : "no"
+        let scrollCurves = get(svc, "HIDScrollAccelCurves") != nil ? "yes" : "no"
+        let product = getString(svc, "Product") ?? "?"
+        print("\(pointerClass) \(String(format: "0x%llx", id)) curves=\(curves) table=\(table) scrollcurves=\(scrollCurves) product=\"\(product)\"")
+    }
+}
+
 func cmdList() {
     for (label, client) in clients() {
         print("=== client: \(label) ===")
@@ -497,6 +529,7 @@ func usage() {
       param-dump | param-get <key> | param-set <key> <value> | param-setaccel <key> <double>
       get-system <key>
       get-simple <0xREGISTRYID> <key>
+      pointers                                       # live pointer services + their IDs
       get-id <0xREGISTRYID> <key>
       get-id-raw <0xREGISTRYID> <key>
       write-data <0xREGISTRYID> <key> <outfile>      # dump CFData property as hex
@@ -510,6 +543,7 @@ let args = CommandLine.arguments
 guard args.count >= 2 else { usage(); exit(1) }
 switch args[1] {
 case "list": cmdList()
+case "pointers": cmdPointers()
 case "dump":
     let pointerOnly = args.contains("--pointer-only")
     let registry = !args.contains("--no-registry")

@@ -81,12 +81,44 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
     /// is the equivalent. 1.0 = pure physical 1:1.
     var speedMultiplier: Double = 1.5
 
+    /// How much of macOS's scroll acceleration to apply. 1 = macOS's own
+    /// scroll curve (untouched), 0 = linear scrolling at a constant gain.
+    /// Defaults to native so existing installs never change scroll behavior.
+    var scrollAccelerationAmount: Double = 1.0
+
+    /// Scroll speed multiplier for the (possibly linearized) scroll movement.
+    /// 1.0 = macOS's own scroll distance.
+    var scrollSpeedMultiplier: Double = 1.0
+
+    /// Flips the scroll direction for this device class by negating the
+    /// installed scroll curves. Per-service, so the trackpad can stay natural
+    /// while a mouse wheel is inverted (macOS itself only offers one global
+    /// Natural-scroll switch for both).
+    var invertScroll: Bool = false
+
     var isLinear: Bool { accelerationAmount <= 0.005 }
     var isNative: Bool { accelerationAmount >= 0.995 }
 
-    init(accelerationAmount: Double = 0.5, speedMultiplier: Double = 1.5) {
+    /// True when Decelerate is shaping scroll at all: an amount below 100%,
+    /// a speed other than 1x, or an inverted direction.
+    var isScrollNative: Bool {
+        scrollAccelerationAmount >= 0.995
+            && abs(scrollSpeedMultiplier - 1.0) < 0.01
+            && !invertScroll
+    }
+
+    init(
+        accelerationAmount: Double = 0.5,
+        speedMultiplier: Double = 1.5,
+        scrollAccelerationAmount: Double = 1.0,
+        scrollSpeedMultiplier: Double = 1.0,
+        invertScroll: Bool = false
+    ) {
         self.accelerationAmount = accelerationAmount
         self.speedMultiplier = speedMultiplier
+        self.scrollAccelerationAmount = scrollAccelerationAmount
+        self.scrollSpeedMultiplier = scrollSpeedMultiplier
+        self.invertScroll = invertScroll
     }
 
     // MARK: - Codable (with migration from the original on/off setting)
@@ -95,6 +127,9 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
         case accelerationAmount
         case speedMultiplier
         case removeAcceleration
+        case scrollAccelerationAmount
+        case scrollSpeedMultiplier
+        case invertScroll
     }
 
     init(from decoder: Decoder) throws {
@@ -112,11 +147,21 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
         }
         let decodedSpeed = try container.decodeIfPresent(Double.self, forKey: .speedMultiplier) ?? 1.5
         speedMultiplier = min(max(decodedSpeed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
+        // Scroll keys are new: installs that predate them decode as native
+        // (scroll untouched), which preserves the previous behavior.
+        let decodedScrollAmount = try container.decodeIfPresent(Double.self, forKey: .scrollAccelerationAmount) ?? 1.0
+        scrollAccelerationAmount = min(max(decodedScrollAmount, 0), 1)
+        let decodedScrollSpeed = try container.decodeIfPresent(Double.self, forKey: .scrollSpeedMultiplier) ?? 1.0
+        scrollSpeedMultiplier = min(max(decodedScrollSpeed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
+        invertScroll = try container.decodeIfPresent(Bool.self, forKey: .invertScroll) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(accelerationAmount, forKey: .accelerationAmount)
         try container.encode(speedMultiplier, forKey: .speedMultiplier)
+        try container.encode(scrollAccelerationAmount, forKey: .scrollAccelerationAmount)
+        try container.encode(scrollSpeedMultiplier, forKey: .scrollSpeedMultiplier)
+        try container.encode(invertScroll, forKey: .invertScroll)
     }
 }

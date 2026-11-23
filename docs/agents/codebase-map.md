@@ -9,7 +9,7 @@ Maintenance: after adding, moving, or deleting a source file, update the File in
 - Menu-bar-only app (`LSUIElement`) that reduces pointer acceleration per device class, trackpad and mouse. 0% is 1:1 movement, 100% is macOS's own curve, values in between blend the two inside the HID pipeline.
 - Entry and lifecycle: `Decelerate/App/DecelerateApp.swift:6` builds the `MenuBarExtra` and `Settings` scenes; its `AppDelegate` at `Decelerate/App/DecelerateApp.swift:67` starts the model, handles dev/QA launch flags, and restores on terminate.
 - Single observable model: `Decelerate/App/AppState.swift:10` (`@MainActor`). Views own no state; all settings changes and HID actions go through it.
-- Core engine: `Decelerate/Core/AccelerationController.swift:34` (`@MainActor`) snapshots originals, chooses a route per pointer class, installs curves or scales parameters, retries after wake/attach, and restores on quit.
+- Core engine: `Decelerate/Core/AccelerationController.swift:34` (`@MainActor`) snapshots originals, chooses a route per pointer class, installs curves or scales parameters, retries after wake/attach, verifies its own work against the live HID services, and restores on quit.
 - Two HID write paths: `Decelerate/Core/HIDPointerControl.swift:34` (IOHIDSystem parameter dictionary) and `Decelerate/Core/HIDServiceBridge.swift:82` (per-service event-system curves and properties). Blend math is isolated in `Decelerate/Core/AccelerationCurveBuilder.swift:31`.
 - Domain docs: no CONTEXT, GLOSSARY or ADR files. The mechanism research is `Notes/acceleration-research.md`; the continuous-amount derivation is `Notes/acceleration-amount-research.md`. Read them only when changing the apply path or curve constants.
 - Generated, not source: `build/`, `build-ui/`, `dist/`, `Tools/Probe/bin/`, `Tools/Probe/out/`.
@@ -34,13 +34,14 @@ Maintenance: after adding, moving, or deleting a source file, update the File in
 | Menu bar panel | `Decelerate/UI/MenuBarPanel.swift:8`; cards and controls in `Decelerate/UI/Components/PointerClassCard.swift:10` |
 | Settings window and tabs | `Decelerate/UI/SettingsView.swift:8` (General, Devices, About tabs in the same file) |
 | Global state and user actions | `Decelerate/App/AppState.swift:10`; setters at `:168`, `:175`, `:183`, `:192` |
-| Applying the current settings | `Decelerate/Core/AccelerationController.swift:267`; `performApply` at `:346` |
-| Restore on quit | `Decelerate/App/DecelerateApp.swift:75` to `Decelerate/App/AppState.swift:96` to `Decelerate/Core/AccelerationController.swift:245` and `:488` |
-| Restore macOS defaults button | `Decelerate/App/AppState.swift:227` |
-| Wake / device-attach re-apply | `Decelerate/Core/AccelerationController.swift:210`, `:225`, `:285` |
+| Applying the current settings | `Decelerate/Core/AccelerationController.swift:430`; `performApply` at `:615` |
+| Restore on quit | `Decelerate/App/DecelerateApp.swift:75` to `Decelerate/App/AppState.swift:96` to `Decelerate/Core/AccelerationController.swift:403` and `:803` |
+| Restore macOS defaults button | `Decelerate/App/AppState.swift:271` |
+| Wake / device-attach re-apply | `Decelerate/Core/AccelerationController.swift:351` (observers), `:448` (`reapplyAfterEnvironmentChange`) |
+| Applied-state verification | `Decelerate/Core/AccelerationController.swift:509` (`startWatchdog`), `:546` (`verifyAppliedServices`), `:579` (`heal`); service identity in `Decelerate/Core/HIDServiceBridge.swift:200` (`pointerServiceFingerprint`); proof in `Tools/Probe/verify-applied.py` |
 | HID parameter read and write | `Decelerate/Core/HIDPointerControl.swift:80` (`readRaw`), `:95` (`writeRaw`), `:127` (`openParameterConnection`) |
 | Connection reopen after wake | `Decelerate/Core/HIDPointerControl.swift:107` (`reopenIfNeeded`), `:118` (`forceReopen`) |
-| Per-service user curves | `Decelerate/Core/HIDServiceBridge.swift:113` (`pointerServices`), `:183` (`setCurves`), `:200` (`clearCurves`) |
+| Per-service user curves | `Decelerate/Core/HIDServiceBridge.swift:154` (`pointerServices`), `:291` (`setCurves`), `:308` (`clearCurves`), `:314` (`setScrollCurves`) |
 | Curve blend and speed math | `Decelerate/Core/AccelerationCurveBuilder.swift:39`; source-derived model in `Tools/Probe/curve_math.py` |
 | Pointer classes, speed scale, defaults | `Decelerate/Core/PointerSettings.swift:9`, `:41`, `:68` |
 | Preference keys and HID snapshots | `Decelerate/Core/PreferencesStore.swift:8` |
@@ -50,11 +51,11 @@ Maintenance: after adding, moving, or deleting a source file, update the File in
 | Launch at login | `Decelerate/App/AppState.swift:248` (`SMAppService`) |
 | Status pill text | `Decelerate/UI/Components/StatusBadge.swift:7`; `AppState.statusPillLabel` extension at `:55` |
 | Build and install | `Scripts/build.sh`, `Scripts/install.sh` |
-| HID probes | `Tools/Probe/check-state.py`, `Tools/Probe/filterlog.sh`, `Tools/Probe/hidprobe.swift` |
+| HID probes | `Tools/Probe/check-state.py`, `Tools/Probe/filterlog.sh`, `Tools/Probe/verify-applied.py`, `Tools/Probe/hidprobe.swift` (`pointers` command) |
 
 ## Task recipes
 
-**Change how acceleration is applied.** Read `Decelerate/Core/AccelerationController.swift` (`performApply` routes per class and decides between curves and index scaling), `Decelerate/Core/HIDServiceBridge.swift` (how user curves are written), and `Decelerate/Core/HIDPointerControl.swift` (parameter read/write). Change the engine there, then verify with `./Scripts/build.sh` plus `./Tools/Probe/filterlog.sh 10 10` and `python3 Tools/Probe/check-state.py`.
+**Change how acceleration is applied.** Read `Decelerate/Core/AccelerationController.swift` (`performApply` routes per class and decides between curves and index scaling), `Decelerate/Core/HIDServiceBridge.swift` (how user curves are written), and `Decelerate/Core/HIDPointerControl.swift` (parameter read/write). Change the engine there, then verify with `./Scripts/build.sh`, `python3 Tools/Probe/verify-applied.py` (proves the curves are attached to the live services), plus `./Tools/Probe/filterlog.sh 10 10` and `python3 Tools/Probe/check-state.py`.
 
 **Tune the blend curve or speed scaling.** Read `Decelerate/Core/AccelerationCurveBuilder.swift` and the derivation in `Notes/acceleration-amount-research.md`; the executable model is `Tools/Probe/curve_math.py`. Change the builder, then compare against the research notes before rebuilding with `./Scripts/build.sh`.
 
@@ -76,6 +77,7 @@ The real verification path is build plus a manual run plus the research probes:
 - UI smoke test without the menu bar: `dist/Decelerate.app/Contents/MacOS/Decelerate --preview-panel` and `--preview-settings`; capture one window with `swift Scripts/windowshot.swift Decelerate /tmp/panel.png`.
 - Clean-quit behavior: `DECELERATE_DEBUG=1 dist/Decelerate.app/Contents/MacOS/Decelerate --quit-after 5`; stderr should show the restore path and the original parameters should come back.
 - System state: `python3 Tools/Probe/check-state.py` before and after a run, and `./Tools/Probe/filterlog.sh 10 10` for live acceleration decisions. `Tools/Probe/filterlog.sh` exits 1 when no matching window of WindowServer log lines is found, which is not a failure.
+- Installed-shaping check: `python3 Tools/Probe/verify-applied.py` compares the stored preferences with the live HID service IDs (`bin/hidprobe pointers`) and the `UserPointerAccelCurvesKey` writes in the WindowServer log. It exits 1 when a shaped class is not attached to its live service, which is exactly the silent revert users report; `2` means the log window is too short. Run it after changing the apply path and whenever a report says the pointer feels native again.
 - Probe build/typecheck: `./Tools/Probe/build.sh` builds `hidprobe` and `tapmeasure` and typechecks the drop-in controller.
 - No fast/unit suite exists to run during a normal change. Every run above needs a signed-in macOS GUI session (macOS 14 or later), so there is no headless or CI path. `tapmeasure listen` is the only probe that needs Accessibility/Input Monitoring permission and physical input; it is research tooling, not a regression test.
 
@@ -90,7 +92,9 @@ The real verification path is build plus a manual run plus the research probes:
 ## Gotchas
 
 - The negative-IOFixed sentinel described in `Notes/acceleration-research.md` and `Tools/Probe/PointerAccelerationController.swift` is the original research path; the shipping app never writes it (see `Notes/acceleration-amount-research.md` §13). For 0% it installs constant-gain user curves and writes the original positive parameter back (`Decelerate/Core/AccelerationController.swift:395`). Trust the code when editing the apply path.
-- `UserPointerAccelCurvesKey` is write-only: copying it back returns nil even in the writing process (`Decelerate/Core/HIDServiceBridge.swift:192`). Verify installed curves with `./Tools/Probe/filterlog.sh`, not by read-back.
+- `UserPointerAccelCurvesKey` is write-only: copying it back returns nil even in the writing process (`Decelerate/Core/HIDServiceBridge.swift:291`). Verify installed curves with `python3 Tools/Probe/verify-applied.py` or `./Tools/Probe/filterlog.sh`, not by read-back.
+- A user curve belongs to one HID service *instance* and dies with it. The built-in trackpad replaces its service on every wake from idle, sleep/wake replaces every service, and nothing notifies the app: no device attach (`IOHIDManager` never sees the hardware go away), no parameter change, and no wake notification. That silent replacement is the recurring "deceleration and speed stopped working" bug. `verifyAppliedServices` (`Decelerate/Core/AccelerationController.swift:546`) polls the service identity through a freshly created event-system client every 2 s and re-applies when the set changes. Do not weaken it or make an apply depend on a notification, and never cache a `HIDPointerService` across applies.
+- Write the HID parameters before installing a curve, in `performApply` and `applyScroll`. A global parameter write can rebuild the accelerator and drop the per-service cached curve, so a parameter write that follows the curve install silently hands the pointer back to macOS.
 - `AppState` and `AccelerationController` are `@MainActor`; cross-thread work is bounced by the private `OnMain` helper in `Decelerate/Core/AccelerationController.swift`. Do not call the controller from a background context.
 - Apply is deliberately retried: `retryDelays` at `Decelerate/Core/AccelerationController.swift:90` totals about 18 seconds after wake or attach, so a temporarily missing pointer class is not a bug.
 - The snapshot protects itself: `lastWritten` values are never mistaken for the user's original, and `com.apple.*.scaling` defaults are treated as ground truth (`Decelerate/Core/AccelerationController.swift:125`, `:636`). Removing that logic can corrupt the restore.
@@ -137,10 +141,11 @@ The real verification path is build plus a manual run plus the research probes:
 `Tools/Probe/`
 
 - `Tools/Probe/PointerAccelerationController.swift` - standalone drop-in controller used as a compile-time reference.
-- `Tools/Probe/hidprobe.swift` - research CLI: services, properties, parameter reads/writes, TCC state.
+- `Tools/Probe/hidprobe.swift` - research CLI: services, properties, parameter reads/writes, TCC state. `pointers` prints the live pointer service IDs for `verify-applied.py`.
 - `Tools/Probe/tapmeasure.swift` - CGEventTap delta measurement and synthetic-event smoke test.
 - `Tools/Probe/curve_math.py` - source-derived model of Apple's accelerators, blend curves and gain tables.
 - `Tools/Probe/check-state.py` - read-only JSON snapshot of HID parameters, service mirrors and pointer defaults.
+- `Tools/Probe/verify-applied.py` - read-only regression check: are the user curves attached to the live HID services (preferences vs. filter log vs. live service IDs)? Exit 1 is the silent-revert bug.
 - `Tools/Probe/filterlog.sh` - read-only view of live `IOHIDPointerScrollFilter` decisions.
 - `Tools/Probe/tcc-test.sh` - builds and runs an ad-hoc signed probe that proves no TCC permission is needed.
 - `Tools/Probe/TCCProbe/main.c` - the minimal C probe used by `Tools/Probe/tcc-test.sh`.

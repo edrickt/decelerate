@@ -87,7 +87,7 @@ private struct GeneralSettingsTab: View {
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("Decelerate will return pointer acceleration to the macOS default, reset the Speed controls to 1×, and put your Mac's pointer settings back the way they were before Decelerate started.")
+                    Text("Decelerate will return pointer acceleration to the macOS default, reset the Speed controls to 1×, restore normal scroll direction and speed, and put your Mac's pointer settings back the way they were before Decelerate started.")
                 }
             } footer: {
                 Text("Use this to return to the system's standard pointer acceleration.")
@@ -180,7 +180,7 @@ private struct AboutSettingsTab: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Text("Decelerate removes macOS pointer acceleration so a given hand movement always moves the cursor the same distance. Trackpad and mouse movement stays 1:1, like Windows with \"Enhance pointer precision\" turned off.")
+                Text("Decelerate removes macOS pointer acceleration so a given hand movement always moves the cursor the same distance. Trackpad and mouse movement stays 1:1, like Windows with \"Enhance pointer precision\" turned off. Scroll shaping is optional per device class, including a mouse-only scroll-direction invert that leaves the trackpad alone.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -188,7 +188,7 @@ private struct AboutSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 DisclosureGroup("How it works", isExpanded: $isShowingHowItWorks) {
-                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% replaces the acceleration curve with a flat gain so movement stays linear and only the Speed control scales it, 100% is macOS's own acceleration curve, and intermediate values mix the two. A separate Speed control (0.5×–2×, with 1.5× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
+                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% replaces the acceleration curve with a flat gain so movement stays linear and only the Speed control scales it, 100% is macOS's own acceleration curve, and intermediate values mix the two. A separate Speed control (0.5×–2×, with 1.5× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). Scroll works the same way per device class through the scroll accelerator: an acceleration blend plus speed, with an optional mouse-only direction invert that negates the wheel's scroll curves while the trackpad keeps its direction. No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

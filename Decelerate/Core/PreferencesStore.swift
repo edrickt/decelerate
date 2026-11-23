@@ -15,6 +15,8 @@ struct PreferencesStore {
         static let onboardingDone = "general.onboardingDone"
         static let accelerationOriginals = "system.accelerationOriginals"
         static let accelerationWrites = "system.accelerationWrites"
+        static let scrollOriginals = "system.scrollOriginals"
+        static let scrollWrites = "system.scrollWrites"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -79,6 +81,32 @@ struct PreferencesStore {
 
     func clearAccelerationWrites() {
         defaults.removeObject(forKey: Key.accelerationWrites)
+    }
+
+    // MARK: - Scroll snapshot (same crash-safe pattern as pointer)
+
+    func saveScrollOriginals(_ values: [String: Int32]) {
+        encode(values, forKey: Key.scrollOriginals)
+    }
+
+    func loadScrollOriginals() -> [String: Int32] {
+        decode(Key.scrollOriginals) ?? [:]
+    }
+
+    func clearScrollOriginals() {
+        defaults.removeObject(forKey: Key.scrollOriginals)
+    }
+
+    func saveScrollWrites(_ values: [String: Int32]) {
+        encode(values, forKey: Key.scrollWrites)
+    }
+
+    func loadScrollWrites() -> [String: Int32] {
+        decode(Key.scrollWrites) ?? [:]
+    }
+
+    func clearScrollWrites() {
+        defaults.removeObject(forKey: Key.scrollWrites)
     }
 
     // MARK: - Helpers

@@ -26,6 +26,25 @@ enum HIDPropertyKey {
     /// string the filter looks up (verified from the WindowServer debug log),
     /// despite the Apple constant being named `kIOHIDUserPointerAccelCurvesKey`.
     static let userCurves = "UserPointerAccelCurvesKey"
+    /// Scroll counterpart, verified live the same way: writing it logs
+    /// `Acceleration key:UserScrollAccelCurvesKey` and rebuilds the scroll
+    /// accelerator, including constant and negative (inverting) gains.
+    static let userScrollCurves = "UserScrollAccelCurvesKey"
+    /// Per-service parametric scroll curves, when the device has them (Apple
+    /// trackpads do; plain USB mice fall back to the filter's default table).
+    static let nativeScrollCurves = "HIDScrollAccelCurves"
+    /// Per-service scroll acceleration type selector. The scroll filter picks
+    /// its acceleration value from this key (not from the pointer type), so
+    /// scroll shaping must be routed by it.
+    static let scrollAccelerationType = "HIDScrollAccelerationType"
+    /// Generic scroll acceleration parameter. Machine-wide: Apple's scroll
+    /// filter uses it as the last fallback for every device and the kernel also
+    /// links it to the mouse key, so a per-class setting must never shape it.
+    static let scrollAcceleration = "HIDScrollAcceleration"
+    /// Type-specific scroll acceleration parameters. These are the only scroll
+    /// parameters a device class may shape.
+    static let mouseScrollAcceleration = "HIDMouseScrollAcceleration"
+    static let trackpadScrollAcceleration = "HIDTrackpadScrollAcceleration"
 
     static let product = "Product"
     static let transport = "Transport"
@@ -59,6 +78,10 @@ struct HIDPointerService {
     let nativeCurves: [[String: Int]]?
     /// Native acceleration table, when the device has one.
     let nativeTable: Data?
+    /// Native parametric scroll curves, when the device has them.
+    let nativeScrollCurves: [[String: Int]]?
+    /// Value of `HIDScrollAccelerationType` (e.g. "HIDMouseScrollAcceleration").
+    let scrollAccelerationType: String?
 
     var isTrackpad: Bool {
         accelerationType == HIDPropertyKey.trackpadAcceleration
@@ -71,6 +94,24 @@ struct HIDPointerService {
 
     /// The device has a readable classic acceleration table.
     var hasAccelerationTable: Bool { nativeTable != nil }
+
+    /// The device exposes macOS's parametric scroll curves.
+    var hasNativeScrollCurves: Bool { nativeScrollCurves != nil }
+
+    /// The parameter key the scroll filter actually reads for this service.
+    ///
+    /// Apple's lookup order is the type-specific key, then
+    /// `HIDMouseScrollAcceleration` for devices without a type, then the
+    /// machine-wide `HIDScrollAcceleration`. The generic key is reported as
+    /// `nil`: it is shared by every scroll device, so it is never a valid
+    /// per-class target. Devices without a type key fall back to the mouse key,
+    /// matching what the filter itself does.
+    var resolvedScrollParameterKey: String? {
+        guard let type = scrollAccelerationType, !type.isEmpty else {
+            return HIDPropertyKey.mouseScrollAcceleration
+        }
+        return type == HIDPropertyKey.scrollAcceleration ? nil : type
+    }
 }
 
 /// Access to the pointer event services and their acceleration properties.
@@ -134,10 +175,39 @@ final class HIDServiceBridge {
                 product: product,
                 accelerationType: accelerationType,
                 nativeCurves: curves(of: ref),
-                nativeTable: table(of: ref)
+                nativeTable: table(of: ref),
+                nativeScrollCurves: scrollCurves(of: ref),
+                scrollAccelerationType: string(ref, HIDPropertyKey.scrollAccelerationType)
             ))
         }
         return result
+    }
+
+    /// Registry IDs of the pointer services that are live right now.
+    ///
+    /// A user curve is installed on one `IOHIDServiceClient` and is cached by
+    /// that service's filter instance only, so the shaping disappears together
+    /// with the service. macOS replaces pointer services without any
+    /// notification: the built-in trackpad gets a new one when it wakes from
+    /// idle, sleep/wake does it for every device, and WindowServer re-creates
+    /// them after a session change. Registry IDs are the cheap, reliable way to
+    /// notice that, because they need no property reads and change whenever a
+    /// service is replaced.
+    ///
+    /// This is deliberately separate from `pointerServices()`: it only asks
+    /// "which services exist", skipping the per-service property and
+    /// IORegistry lookups, so it is cheap enough to poll.
+    func pointerServiceFingerprint() -> Set<UInt64> {
+        guard let client, let array = IOHIDEventSystemClientCopyServices(client) else { return [] }
+        var ids: Set<UInt64> = []
+        for index in 0..<CFArrayGetCount(array) {
+            guard let raw = CFArrayGetValueAtIndex(array, index) else { continue }
+            let ref = unsafeBitCast(raw, to: IOHIDServiceClient.self)
+            guard isPointer(ref) else { continue }
+            let id = idOf(ref)
+            if id != 0 { ids.insert(id) }
+        }
+        return ids
     }
 
     private func isPointer(_ service: IOHIDServiceClient) -> Bool {
@@ -159,8 +229,50 @@ final class HIDServiceBridge {
     }
 
     func curves(of service: IOHIDServiceClient) -> [[String: Int]]? {
-        guard let raw = IOHIDServiceClientCopyProperty(service, HIDPropertyKey.nativeCurves as CFString)
-                as? [[String: Any]], !raw.isEmpty else {
+        if let direct = parseCurves(IOHIDServiceClientCopyProperty(service, HIDPropertyKey.nativeCurves as CFString)) {
+            return direct
+        }
+        // Some services (notably AppleMultitouchDevice) keep their parametric
+        // curves in the IORegistry entry but do not expose them through the
+        // event-system client. Without this fallback the route stays
+        // unresolved forever and blended curves silently never install.
+        guard let id = IOHIDServiceClientGetRegistryID(service) as? NSNumber else { return nil }
+        return parseCurves(registryProperty(id.uint64Value, HIDPropertyKey.nativeCurves))
+    }
+
+    func table(of service: IOHIDServiceClient) -> Data? {
+        if let direct = IOHIDServiceClientCopyProperty(service, HIDPropertyKey.accelerationTable as CFString) as? Data {
+            return direct
+        }
+        return registryProperty(idOf(service), HIDPropertyKey.accelerationTable) as? Data
+    }
+
+    func scrollCurves(of service: IOHIDServiceClient) -> [[String: Int]]? {
+        if let direct = parseCurves(IOHIDServiceClientCopyProperty(service, HIDPropertyKey.nativeScrollCurves as CFString)) {
+            return direct
+        }
+        guard let id = IOHIDServiceClientGetRegistryID(service) as? NSNumber else { return nil }
+        return parseCurves(registryProperty(id.uint64Value, HIDPropertyKey.nativeScrollCurves))
+    }
+
+    private func idOf(_ service: IOHIDServiceClient) -> UInt64 {
+        (IOHIDServiceClientGetRegistryID(service) as? NSNumber)?.uint64Value ?? 0
+    }
+
+    /// Read-only lookup of one IORegistry entry property by registry ID.
+    private func registryProperty(_ registryID: UInt64, _ key: String) -> Any? {
+        guard registryID != 0, let matching = IORegistryEntryIDMatching(registryID) else { return nil }
+        let entry = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard entry != 0 else { return nil }
+        defer { IOObjectRelease(entry) }
+        var props: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let dict = props?.takeRetainedValue() as? [String: Any] else { return nil }
+        return dict[key]
+    }
+
+    private func parseCurves(_ value: Any?) -> [[String: Int]]? {
+        guard let raw = value as? [[String: Any]], !raw.isEmpty else {
             return nil
         }
         let curves: [[String: Int]] = raw.compactMap { dictionary in
@@ -173,10 +285,6 @@ final class HIDServiceBridge {
             return result.isEmpty ? nil : result
         }
         return curves.isEmpty ? nil : curves
-    }
-
-    func table(of service: IOHIDServiceClient) -> Data? {
-        IOHIDServiceClientCopyProperty(service, HIDPropertyKey.accelerationTable as CFString) as? Data
     }
 
     @discardableResult
@@ -200,6 +308,25 @@ final class HIDServiceBridge {
     func clearCurves(on service: IOHIDServiceClient) -> Bool {
         // An empty array makes the filter fall back to the device's own curves.
         IOHIDServiceClientSetProperty(service, HIDPropertyKey.userCurves as CFString, [] as CFArray)
+    }
+
+    @discardableResult
+    func setScrollCurves(_ curves: [[String: Int]], on service: IOHIDServiceClient) -> Bool {
+        let array: [CFDictionary] = curves.map { curve in
+            var dictionary: [String: Any] = [:]
+            for (key, value) in curve { dictionary[key] = NSNumber(value: value) }
+            return dictionary as CFDictionary
+        }
+        return IOHIDServiceClientSetProperty(service, HIDPropertyKey.userScrollCurves as CFString, array as CFArray)
+    }
+
+    // Note: like its pointer counterpart, `UserScrollAccelCurvesKey` is
+    // write-only from this side; the filter's own log (`filterlog.sh`) is the
+    // available evidence that a write reached the live scroll accelerator.
+
+    @discardableResult
+    func clearScrollCurves(on service: IOHIDServiceClient) -> Bool {
+        IOHIDServiceClientSetProperty(service, HIDPropertyKey.userScrollCurves as CFString, [] as CFArray)
     }
 
     @discardableResult

@@ -156,10 +156,14 @@ Diagnostics while developing:
 ```sh
 ./Tools/Probe/bin/hidprobe get HIDTrackpadAcceleration   # read the live parameters
 ./Tools/Probe/filterlog.sh 10 10                          # WindowServer's acceleration decisions
+python3 Tools/Probe/verify-applied.py                     # is the shaping attached to the live HID services?
 ```
 
 The regression test for the UI is a build plus `--preview-*` screenshot; there
-is no unit-test target yet.
+is no unit-test target yet. The regression test for the acceleration itself is
+`Tools/Probe/verify-applied.py`: it proves the user curves are attached to the
+live HID services, which is what silently breaks when macOS replaces a pointer
+service (the app repairs that within about two seconds).
 
 ## License
 

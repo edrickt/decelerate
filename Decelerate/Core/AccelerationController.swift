@@ -73,9 +73,13 @@ final class AccelerationController {
     private var desired: [PointerClass: CategoryPreferences] = [:]
     /// Original IOFixed acceleration values per parameter key.
     private var originals: [String: Int32] = [:]
+    /// Original IOFixed scroll-acceleration values per parameter key.
+    private var scrollOriginals: [String: Int32] = [:]
     /// Values written by this controller (persisted), so its own writes are not
     /// mistaken for external changes or for the user's original setting.
     private var lastWritten: [String: Int32] = [:]
+    /// Scroll values written by this controller (persisted), same protection.
+    private var scrollLastWritten: [String: Int32] = [:]
     private var isReapplying = false
     private var isTerminating = false
     /// While a re-apply is writing parameters, property-change callbacks are
@@ -99,6 +103,35 @@ final class AccelerationController {
     /// unreadable acceleration representation is accepted as genuine (see
     /// `performApply`).
     private var isFinalRetryAttempt = false
+
+    // MARK: - Applied-state verification
+
+    /// Registry IDs of the pointer services the last fully accepted apply
+    /// shaped. `UserPointerAccelCurvesKey` is write-only (it reads back nil even
+    /// in the writing process), so the service identity is the only available
+    /// proof that the curves are still attached to a live filter instance.
+    /// The built-in trackpad replaces its HID service whenever it wakes from
+    /// idle, and a replacement silently reverts the pointer to macOS's own
+    /// curve: this is the recurring "deceleration stopped working" report.
+    private var appliedFingerprint: Set<UInt64>?
+    /// Service set the most recent apply was attempted for, successful or not.
+    /// Used to back off instead of re-applying in a loop.
+    private var lastAttemptFingerprint: Set<UInt64>?
+    private var lastAttemptAt = Date.distantPast
+    private var watchdogTimer: Timer?
+    private var activationObservers: [NSObjectProtocol] = []
+    /// An external parameter change that arrived inside the settling window and
+    /// still has to be re-applied (see `deferExternalChange`).
+    private var hasDeferredExternalChange = false
+    private var deferredChangeWorkItem: DispatchWorkItem?
+
+    /// How often the live pointer services are compared with the shaped ones.
+    /// With all settings native the check does no work at all, and with an
+    /// unchanged service set it only enumerates registry IDs.
+    private static let watchdogInterval: TimeInterval = 2
+    /// Spacing between repair attempts for the *same* service set when the
+    /// apply keeps failing; the retry series already covers the first ~18 s.
+    private static let watchdogFailureBackoff: TimeInterval = 30
 
     private(set) var lastError: String?
     /// Retained for API stability: this implementation intercepts no input and
@@ -132,6 +165,22 @@ final class AccelerationController {
         }
         self.originals = loaded
         store.saveAccelerationOriginals(loaded)
+        // Scroll snapshot: unlike pointer tracking speed there is no reliable
+        // `com.apple.*` ground-truth pref for scroll (the historic
+        // `com.apple.scrollwheel.scaling` key is absent on current macOS), so
+        // the live value stands unless it is implausible.
+        var scrollLoaded = store.loadScrollOriginals()
+        for key in Self.managedScrollKeys {
+            if let stored = scrollLoaded[key], Self.isPlausibleOriginal(stored) {
+                continue
+            } else {
+                scrollLoaded[key] = Self.scrollFallbackValue(forKey: key)
+            }
+        }
+        self.scrollOriginals = scrollLoaded
+        store.saveScrollOriginals(scrollLoaded)
+        self.scrollLastWritten = store.loadScrollWrites()
+            .filter { Self.managedScrollKeys.contains($0.key) }
     }
 
     /// A stored/read acceleration value is a curve selector (IOFixed). The real
@@ -179,13 +228,65 @@ final class AccelerationController {
 
     private static func pointerClass(forParameterKey key: String) -> PointerClass? {
         switch key {
-        case HIDPropertyKey.trackpadAcceleration:
+        case HIDPropertyKey.trackpadAcceleration, HIDPropertyKey.trackpadScrollAcceleration:
             return .trackpad
-        case HIDPropertyKey.mouseAcceleration, HIDPropertyKey.pointerAcceleration:
+        case HIDPropertyKey.mouseAcceleration, HIDPropertyKey.pointerAcceleration,
+            HIDPropertyKey.mouseScrollAcceleration:
             return .mouse
         default:
+            // `HIDScrollAcceleration` is intentionally absent: it is the
+            // machine-wide scroll fallback, not a mouse setting.
             return nil
         }
+    }
+
+    // MARK: - Scroll mapping
+
+    /// The scroll parameters each class is allowed to shape. Only the
+    /// type-specific key belongs to a class; macOS uses the generic
+    /// `HIDScrollAcceleration` for every device as a fallback, so shaping it
+    /// from the mouse class would change trackpads too.
+    private static func scrollParameterKeys(for pointerClass: PointerClass) -> [String] {
+        switch pointerClass {
+        case .trackpad: return [HIDPropertyKey.trackpadScrollAcceleration]
+        case .mouse: return [HIDPropertyKey.mouseScrollAcceleration]
+        }
+    }
+
+    /// Scroll parameters Decelerate snapshots and restores. The type-specific
+    /// keys are the per-class shaping targets; the generic key is included only
+    /// so a value written by an older build is handed back on restore. It is
+    /// never shaped per class.
+    private static var managedScrollKeys: [String] {
+        [
+            HIDPropertyKey.trackpadScrollAcceleration,
+            HIDPropertyKey.mouseScrollAcceleration,
+            HIDPropertyKey.scrollAcceleration,
+        ]
+    }
+
+    private static func isScrollParameterKey(_ key: String) -> Bool {
+        managedScrollKeys.contains(key)
+    }
+
+    /// Identity of the services an apply shaped. Registry ID 0 means "no
+    /// registry entry", which cannot be compared or targeted, so it is ignored.
+    private static func fingerprint(of services: [HIDPointerService]) -> Set<UInt64> {
+        Set(services.map(\.registryID).filter { $0 != 0 })
+    }
+
+    /// Fallback scroll value when no snapshot survived. The macOS default on
+    /// the machines measured so far is 0.3125 for every scroll key.
+    private static func scrollFallbackValue(forKey _: String) -> Int32 {
+        20_480
+    }
+
+    /// The scroll value to hand back to macOS for a key, guaranteed to be sane.
+    private func scrollOriginalValue(forKey key: String) -> Int32 {
+        if let raw = scrollOriginals[key], Self.isPlausibleOriginal(raw) { return raw }
+        let derived = Self.scrollFallbackValue(forKey: key)
+        scrollOriginals[key] = derived
+        return derived
     }
 
     private static func fallbackValue(forKey key: String) -> Int32 {
@@ -196,6 +297,46 @@ final class AccelerationController {
 
     private static func pointerClass(for service: HIDPointerService) -> PointerClass {
         service.isTrackpad ? .trackpad : .mouse
+    }
+
+    /// Pointer class implied by a service's own scroll acceleration type. The
+    /// scroll filter selects its acceleration value from
+    /// `HIDScrollAccelerationType`, which can differ from the pointer type, so
+    /// scroll shaping is routed by this instead of the pointer class.
+    private static func scrollClass(for service: HIDPointerService) -> PointerClass? {
+        switch service.scrollAccelerationType {
+        case HIDPropertyKey.trackpadScrollAcceleration: return .trackpad
+        case HIDPropertyKey.mouseScrollAcceleration: return .mouse
+        default: return nil
+        }
+    }
+
+    /// The services one class's scroll settings may touch. A service whose
+    /// scroll type names the other class is never included, which is what keeps
+    /// a Mouse setting off a Trackpad (and the reverse). Services without a
+    /// scroll type fall back to their pointer class.
+    private static func scrollServices(
+        for pointerClass: PointerClass,
+        in services: [HIDPointerService]
+    ) -> [HIDPointerService] {
+        services.filter { service in
+            (scrollClass(for: service) ?? Self.pointerClass(for: service)) == pointerClass
+        }
+    }
+
+    /// Scroll parameter keys another attached class resolves to. Shaping one of
+    /// these would change that class too, so they are skipped.
+    private static func scrollKeysResolvedByOtherClasses(
+        than pointerClass: PointerClass,
+        in services: [HIDPointerService]
+    ) -> Set<String> {
+        var keys: Set<String> = []
+        for other in PointerClass.allCases where other != pointerClass {
+            for service in scrollServices(for: other, in: services) {
+                if let key = service.resolvedScrollParameterKey { keys.insert(key) }
+            }
+        }
+        return keys
     }
 
     // MARK: - Devices
@@ -216,12 +357,23 @@ final class AccelerationController {
                 self.changeHandler?()
             }
         }
-        parameters.startObserving(keys: Self.managedKeys) { [weak self] key, raw in
+        parameters.startObserving(keys: Self.managedKeys + Self.managedScrollKeys) { [weak self] key, raw in
             OnMain.run { self?.systemParameterChanged(key, raw) }
         }
-        // Sleep/wake is the important one: macOS recreates the HID services and
-        // the built-in trackpad gets a new registry ID, so both the service
-        // enumeration and the applied curves are lost.
+        // Activation is a free extra moment to verify: the user just opened the
+        // menu bar panel or Settings, which is exactly when they look at the
+        // status, and a heal here is immediate instead of up to one tick later.
+        let activation = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            OnMain.run { self?.verifyAppliedServices(reason: "app became active") }
+        }
+        activationObservers.append(activation)
+        // Sleep/wake is the other important trigger: macOS recreates the HID
+        // services and the built-in trackpad gets a new registry ID, so both the
+        // service enumeration and the applied curves are lost.
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
             let observer = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: name,
@@ -237,6 +389,12 @@ final class AccelerationController {
             }
             wakeObservers.append(observer)
         }
+        // The safety net that ends the silent-revert class of bug: nothing
+        // notifies this process when macOS replaces a pointer service (the
+        // hardware device never went away, so the IOHIDManager callbacks stay
+        // quiet, and no HID parameter changes either). Poll the service
+        // identity instead and re-apply on any difference.
+        startWatchdog()
     }
 
     /// Stop observing, then hand the original parameters back to macOS. Called
@@ -254,6 +412,11 @@ final class AccelerationController {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         wakeObservers.removeAll()
+        for observer in activationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        activationObservers.removeAll()
+        stopWatchdog()
         cancelRetries()
     }
 
@@ -341,6 +504,112 @@ final class AccelerationController {
         isFinalRetryAttempt = false
     }
 
+    // MARK: - Applied-state verification
+
+    private func startWatchdog() {
+        stopWatchdog()
+        let timer = Timer(timeInterval: Self.watchdogInterval, repeats: true) { [weak self] _ in
+            OnMain.run { self?.verifyAppliedServices(reason: nil) }
+        }
+        timer.tolerance = 0.5
+        RunLoop.main.add(timer, forMode: .common)
+        watchdogTimer = timer
+    }
+
+    private func stopWatchdog() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+        deferredChangeWorkItem?.cancel()
+        deferredChangeWorkItem = nil
+        hasDeferredExternalChange = false
+    }
+
+    /// True when a class is actually being shaped, i.e. when losing a HID
+    /// service would change how the pointer or the wheel behaves.
+    private var isShaping: Bool {
+        desired.values.contains {
+            !$0.isNative || abs($0.speedMultiplier - 1.0) >= 0.01 || !$0.isScrollNative
+        }
+    }
+
+    /// Re-applies when the live pointer services are no longer the ones that
+    /// were shaped. Cheap and idempotent: with an unchanged service set it only
+    /// compares registry IDs and performs no HID writes.
+    ///
+    /// This exists because the loss is completely silent otherwise. macOS
+    /// replaces a pointer service (the built-in trackpad does it on every wake
+    /// from idle) and the per-service user curve goes with it, while the HID
+    /// parameters stay exactly as Decelerate wrote them: no parameter callback
+    /// fires, no device attach is reported, and the curves cannot be read back.
+    /// The pointer silently falls back to macOS acceleration with the UI still
+    /// reporting the settings as applied.
+    private func verifyAppliedServices(reason: String?) {
+        guard !desired.isEmpty, !isTerminating, !isReapplying, isShaping else { return }
+        // A retry series is already re-applying; never race it.
+        guard retryWorkItem == nil, retryAttempt == 0 else { return }
+
+        // Always look through a freshly created connection. A long-lived
+        // IOHIDEventSystemClient does not reliably report services macOS
+        // created after it connected, and "the client cannot see the new
+        // service" is exactly how a reverted pointer stays unnoticed. The
+        // connection is cheap to create and nothing else depends on holding it.
+        bridge.refresh()
+        let live = bridge.pointerServiceFingerprint()
+        guard live != appliedFingerprint else { return }
+        if live == lastAttemptFingerprint,
+           Date().timeIntervalSince(lastAttemptAt) < Self.watchdogFailureBackoff {
+            // Same service set as the last attempt and it has not stuck yet:
+            // the retry series owns that failure, so do not hammer it.
+            return
+        }
+        if live.isEmpty {
+            // No pointer services from a fresh connection is a dead event
+            // system (WindowServer restarting), not a Mac without devices; an
+            // apply that legitimately shaped nothing records an empty set and
+            // is not retried here.
+            heal("the HID event system returned no pointer services", reason: reason)
+            return
+        }
+        let shaped = appliedFingerprint.map { "\($0.count)" } ?? "none"
+        heal("HID services changed (shaped \(shaped), live \(live.count))", reason: reason)
+    }
+
+    /// Re-creates the HID connections and applies again. Used when the services
+    /// that were shaped are no longer the live ones.
+    private func heal(_ message: String, reason: String?) {
+        let suffix = reason.map { " [\($0)]" } ?? ""
+        DebugLog.write("watchdog: \(message)\(suffix); re-applying")
+        parameters.forceReopen()
+        bridge.refresh()
+        retryAttempt = 0
+        isFinalRetryAttempt = false
+        retryMissingClasses = []
+        attemptApply()
+        changeHandler?()
+    }
+
+    /// Re-applies an external parameter change that landed inside the settling
+    /// window. macOS rewrites these parameters exactly when it is creating a HID
+    /// service, which is the same moment Decelerate applies its own values, so
+    /// dropping the callback at that point leaves macOS's value in place while
+    /// the app believes it already shaped the pointer.
+    private func deferExternalChange() {
+        hasDeferredExternalChange = true
+        guard deferredChangeWorkItem == nil else { return }
+        let delay = max(0.05, suppressExternalChangesUntil.timeIntervalSinceNow) + 0.05
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferredChangeWorkItem = nil
+            guard self.hasDeferredExternalChange, !self.isTerminating else { return }
+            self.hasDeferredExternalChange = false
+            DebugLog.write("apply: external parameter change arrived while settling, re-applying")
+            self.attemptApply()
+            self.changeHandler?()
+        }
+        deferredChangeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
     /// Applies the desired state once. Returns true when the HID services were
     /// not ready (or a write was rejected), i.e. another attempt may succeed.
     private func performApply() -> Bool {
@@ -357,9 +626,13 @@ final class AccelerationController {
             return true
         }
         captureOriginalsIfNeeded()
+        captureScrollOriginalsIfNeeded()
         suppressExternalChangesUntil = Date().addingTimeInterval(0.75)
 
         let services = bridge.pointerServices()
+        let fingerprint = Self.fingerprint(of: services)
+        lastAttemptFingerprint = fingerprint
+        lastAttemptAt = Date()
         var rejected = false
         var needsRetry = false
         var observedClasses: Set<PointerClass> = []
@@ -374,6 +647,19 @@ final class AccelerationController {
             let keys = Self.parameterKeys(for: pointerClass)
             DebugLog.write("apply: \(pointerClass) amount=\(amount) speed=\(speed) route=\(route) services=\(classServices.count)")
 
+            // Scroll shaping is independent of the pointer route, so it runs
+            // before the pointer logic: the pointer path can skip a class (0%
+            // pointer acceleration, unresolved curves), and that must never
+            // leave the class's scroll settings unapplied.
+            let scrollResult = applyScroll(
+                category,
+                for: pointerClass,
+                on: Self.scrollServices(for: pointerClass, in: services),
+                avoiding: Self.scrollKeysResolvedByOtherClasses(than: pointerClass, in: services)
+            )
+            rejected = rejected || scrollResult.rejected
+            needsRetry = needsRetry || scrollResult.needsRetry
+
             // Enumeration is stale (right after wake): leave the parameters
             // alone rather than guessing a representation. Only after every
             // retry with a fresh client has failed -- and only for the mouse
@@ -382,7 +668,19 @@ final class AccelerationController {
             // trackpad class is always curve-based (built-in and Magic
             // Trackpads), so a trackpad whose curves cannot be read is stale,
             // never a table device, and must never be index-scaled.
-            let treatAsTable = pointerClass == .mouse && isFinalRetryAttempt
+            //
+            // A mouse class with no curves on any service and no tables
+            // anywhere either is not stale: the device genuinely exposes
+            // neither representation (verified on USB mice whose registry
+            // entries carry no HIDAccelCurves and no acceleration table, with
+            // the filter falling back to its compiled-in default table).
+            // Retries can never resolve that, so route it to index scaling
+            // immediately instead of stalling every slider move for the full
+            // retry window.
+            let classHasCurves = classServices.contains { $0.hasNativeCurves }
+            let classHasTable = classServices.contains { $0.hasAccelerationTable }
+            let treatAsTable = pointerClass == .mouse && !classHasCurves
+                && (isFinalRetryAttempt || !classHasTable)
             if route == .unresolved {
                 guard treatAsTable else {
                     needsRetry = true
@@ -396,6 +694,18 @@ final class AccelerationController {
                 // No acceleration: a constant-gain user curve. User curves take
                 // priority over both the parametric curves and the classic
                 // table, so this works for every device class.
+                //
+                // Parameters first, curve last. A global parameter write can
+                // rebuild the filter and drop the curve it has cached per
+                // service, so the curve has to be the final write; doing this
+                // in the other order is how a correct curve gets wiped right
+                // after it is installed.
+                for key in keys {
+                    if !write(key, originalValue(forKey: key)) {
+                        rejected = true
+                        needsRetry = true
+                    }
+                }
                 if !installConstantCurves(speed: speed, on: classServices) {
                     rejected = true
                     needsRetry = true
@@ -403,18 +713,20 @@ final class AccelerationController {
                 if classServices.isEmpty, retryMissingClasses.contains(pointerClass) {
                     needsRetry = true
                 }
-                // Curves only take effect while acceleration itself is enabled.
+                continue
+            }
+
+            switch effectiveRoute {
+            case .curves:
+                // Parameters first, curves last (see the 0% branch above):
+                // curves only take effect while acceleration itself is enabled,
+                // and a parameter write must never follow the curve install.
                 for key in keys {
                     if !write(key, originalValue(forKey: key)) {
                         rejected = true
                         needsRetry = true
                     }
                 }
-                continue
-            }
-
-            switch effectiveRoute {
-            case .curves:
                 if amount >= Threshold.native, abs(speed - 1.0) < 0.01 {
                     // Exactly macOS's own curve: hand control back.
                     if !clearOverrides(on: classServices) { rejected = true }
@@ -424,19 +736,11 @@ final class AccelerationController {
                         needsRetry = true
                     }
                 }
-                // Curves only take effect while acceleration itself is enabled.
-                for key in keys {
-                    if !write(key, originalValue(forKey: key)) {
-                        rejected = true
-                        needsRetry = true
-                    }
-                }
 
             case .indexScaling:
                 // Table-only devices (most third-party mice) do not expose
                 // parametric curves; amount is the table's own interpolation
                 // (scale the acceleration index). Speed cannot be scaled there.
-                if !clearOverrides(on: classServices) { rejected = true }
                 if amount >= Threshold.native {
                     for key in keys {
                         if !write(key, originalValue(forKey: key)) {
@@ -452,18 +756,20 @@ final class AccelerationController {
                         }
                     }
                 }
+                // A leftover user curve would override the scaled index.
+                if !clearOverrides(on: classServices) { rejected = true }
 
             case .absent:
                 // No device of this class is attached: hand the parameters
                 // back so macOS stays sane without it, and retry when the
                 // device is (or should be) present but has no HID service yet.
-                if !clearOverrides(on: classServices) { rejected = true }
                 for key in keys {
                     if !write(key, originalValue(forKey: key)) {
                         rejected = true
                         needsRetry = true
                     }
                 }
+                if !clearOverrides(on: classServices) { rejected = true }
                 if amount < Threshold.native, retryMissingClasses.contains(pointerClass) {
                     needsRetry = true
                 }
@@ -476,6 +782,15 @@ final class AccelerationController {
         classesWithServices = observedClasses
 
         persistOriginals()
+        persistScrollOriginals()
+        // Only a fully accepted apply counts as "these services are shaped".
+        // A rejected write or a pending retry leaves the verification state
+        // unknown, so the watchdog gives it another chance.
+        appliedFingerprint = (needsRetry || rejected) ? nil : fingerprint
+        if let appliedFingerprint {
+            let ids = appliedFingerprint.sorted().map { String($0, radix: 16) }.joined(separator: ", ")
+            DebugLog.write("apply: shaped \(appliedFingerprint.count) service(s): \(ids)")
+        }
         lastError = rejected ? "macOS rejected a pointer acceleration setting." : nil
         if rejected {
             DebugLog.write("apply: macOS rejected one or more pointer parameter writes")
@@ -501,10 +816,14 @@ final class AccelerationController {
         let services = bridge.pointerServices()
         for service in services {
             if !clearOverrides(on: [service]) { rejected = true }
+            if !clearScrollOverrides(on: [service]) { rejected = true }
         }
         if parameters.isAvailable {
             for key in Self.managedKeys {
                 if !write(key, originalValue(forKey: key)) { rejected = true }
+            }
+            for key in Self.managedScrollKeys {
+                if !writeScroll(key, scrollOriginalValue(forKey: key)) { rejected = true }
             }
         } else {
             rejected = true
@@ -516,12 +835,18 @@ final class AccelerationController {
             // (which now always describe the live value), for the next launch.
             persistOriginals()
             persistWrites()
+            persistScrollOriginals()
+            persistScrollWrites()
             return
         }
         originals.removeAll()
         lastWritten.removeAll()
+        scrollOriginals.removeAll()
+        scrollLastWritten.removeAll()
         persistOriginals()
         persistWrites()
+        persistScrollOriginals()
+        persistScrollWrites()
     }
 
     // MARK: - Routing
@@ -551,7 +876,14 @@ final class AccelerationController {
         guard !services.isEmpty else { return true }
         var ok = true
         for service in services {
-            guard let curves = service.nativeCurves, !curves.isEmpty else { continue }
+            // A service without readable natives must fail loudly (retry, then
+            // surface an error) rather than silently shaping nothing while the
+            // app reports success.
+            guard let curves = service.nativeCurves, !curves.isEmpty else {
+                DebugLog.write("apply: missing native curves for \(service.product)")
+                ok = false
+                continue
+            }
             let blended = AccelerationCurveBuilder.curves(curves, factor: amount, speed: speed)
             if !bridge.setCurves(blended, on: service.ref) {
                 ok = false
@@ -593,6 +925,247 @@ final class AccelerationController {
         return ok
     }
 
+    // MARK: - Scroll
+
+    /// Applies the desired scroll state for one pointer class. Returns whether
+    /// a write was rejected and whether another attempt may succeed.
+    ///
+    /// The scroll pipeline mirrors the pointer one: devices with native
+    /// parametric scroll curves (Apple trackpads) are shaped by blending those
+    /// curves, while table-only devices (plain USB mice) are shaped by scaling
+    /// the scroll acceleration index, which is exactly the default table's own
+    /// interpolation. Inversion negates the installed scroll gains, per
+    /// service, so a mouse wheel can run opposite the trackpad without
+    /// touching macOS's single global Natural-scroll switch and without
+    /// intercepting any events.
+    ///
+    /// Class isolation is structural: `classServices` only contains services
+    /// whose own `HIDScrollAccelerationType` names this class, and parameter
+    /// writes are limited to this class's type-specific key, never the shared
+    /// generic one. A Mouse setting therefore cannot move a Trackpad.
+    private func applyScroll(
+        _ category: CategoryPreferences,
+        for pointerClass: PointerClass,
+        on classServices: [HIDPointerService],
+        avoiding sharedKeys: Set<String>
+    ) -> (rejected: Bool, needsRetry: Bool) {
+        let amount = category.scrollAccelerationAmount
+        let speed = category.scrollSpeedMultiplier
+        let invert = category.invertScroll
+        // Only the class's own type key is a shaping target. A key another
+        // attached class resolves to (including the machine-wide generic key)
+        // is skipped so this class's setting can never move the other device.
+        let keys = Self.scrollParameterKeys(for: pointerClass)
+        let shapeKeys = keys.filter { !sharedKeys.contains($0) }
+        DebugLog.write(
+            "apply scroll: \(pointerClass) amount=\(amount) speed=\(speed) invert=\(invert)"
+                + " keys=\(shapeKeys) skipped=\(keys.filter { sharedKeys.contains($0) })"
+                + " services=\(classServices.map { "\($0.product):\($0.resolvedScrollParameterKey ?? "generic")" })"
+        )
+
+        if category.isScrollNative {
+            // Exactly macOS's own scrolling: hand control back.
+            var rejected = false
+            for key in shapeKeys {
+                if !writeScroll(key, scrollOriginalValue(forKey: key)) {
+                    rejected = true
+                }
+            }
+            if !clearScrollOverrides(on: classServices) { rejected = true }
+            return (rejected, rejected)
+        }
+
+        if classServices.isEmpty {
+            // No device of this class is attached: hand the scroll parameters
+            // back so macOS stays sane without it.
+            var rejected = false
+            for key in shapeKeys {
+                if !writeScroll(key, scrollOriginalValue(forKey: key)) {
+                    rejected = true
+                }
+            }
+            if !clearScrollOverrides(on: classServices) { rejected = true }
+            let needsRetry = retryMissingClasses.contains(pointerClass)
+            return (rejected, rejected || needsRetry)
+        }
+
+        let hasCurves = classServices.allSatisfy { $0.hasNativeScrollCurves }
+        let useCurves = hasCurves || invert || abs(speed - 1.0) >= 0.01
+        if useCurves {
+            // Blend (or linearize) the scroll curves, then flip the direction
+            // when inverted. User scroll curves take priority over both the
+            // parametric curves and the default table, so this also works for
+            // table-only mice. The curves are written per service, so they only
+            // ever shape the devices in this class.
+            var rejected = false
+            var needsRetry = false
+            // Scroll parameters first, curves last, for the same reason as the
+            // pointer path: a parameter write can rebuild the filter and drop
+            // the per-service cached curve.
+            for key in shapeKeys {
+                if !writeScroll(key, scrollOriginalValue(forKey: key)) {
+                    rejected = true
+                    needsRetry = true
+                }
+            }
+            if hasCurves {
+                if !installBlendedScrollCurves(amount, speed: speed, invert: invert, on: classServices) {
+                    rejected = true
+                    needsRetry = true
+                }
+            } else if !installConstantScrollCurves(speed: speed, invert: invert, on: classServices) {
+                rejected = true
+                needsRetry = true
+            }
+            return (rejected, needsRetry)
+        }
+
+        // Table-only device at 1x without inversion: scale the scroll
+        // acceleration index, exactly like the pointer table path.
+        var rejected = false
+        var needsRetry = false
+        if amount >= Threshold.native {
+            for key in shapeKeys {
+                if !writeScroll(key, scrollOriginalValue(forKey: key)) {
+                    rejected = true
+                    needsRetry = true
+                }
+            }
+        } else {
+            for key in shapeKeys {
+                if !writeScrollScaled(key, amount: amount) {
+                    rejected = true
+                    needsRetry = true
+                }
+            }
+        }
+        if !clearScrollOverrides(on: classServices) { rejected = true }
+        return (rejected, needsRetry)
+    }
+
+    private func installBlendedScrollCurves(
+        _ amount: Double,
+        speed: Double,
+        invert: Bool,
+        on services: [HIDPointerService]
+    ) -> Bool {
+        guard !services.isEmpty else { return true }
+        var ok = true
+        for service in services {
+            guard let curves = service.nativeScrollCurves, !curves.isEmpty else {
+                DebugLog.write("apply scroll: missing native scroll curves for \(service.product)")
+                ok = false
+                continue
+            }
+            let blended = AccelerationCurveBuilder.curves(curves, factor: amount, speed: speed)
+            if !bridge.setScrollCurves(invert ? Self.negated(blended) : blended, on: service.ref) {
+                ok = false
+            }
+        }
+        return ok
+    }
+
+    /// Installs a pure constant-gain scroll curve at the chosen speed (and
+    /// direction). Works for parametric devices and for table-only devices
+    /// alike, because user scroll curves take priority over both native
+    /// representations.
+    private func installConstantScrollCurves(speed: Double, invert: Bool, on services: [HIDPointerService]) -> Bool {
+        guard !services.isEmpty else { return true }
+        var ok = true
+        for service in services {
+            let source = service.nativeScrollCurves ?? [[HIDCurveKey.index: 0]]
+            let constant = AccelerationCurveBuilder.curves(source, factor: 0, speed: speed)
+            if !bridge.setScrollCurves(invert ? Self.negated(constant) : constant, on: service.ref) {
+                ok = false
+            }
+        }
+        return ok
+    }
+
+    /// Negates the gain coefficients of scroll curves to flip the scroll
+    /// direction. Breakpoints (tangent speeds) are velocities, not gains, so
+    /// they are left untouched.
+    private static func negated(_ curves: [[String: Int]]) -> [[String: Int]] {
+        curves.map { curve in
+            var flipped = curve
+            for key in [
+                HIDCurveKey.gainLinear, HIDCurveKey.gainParabolic,
+                HIDCurveKey.gainCubic, HIDCurveKey.gainQuartic,
+            ] {
+                if let gain = flipped[key] {
+                    flipped[key] = -gain
+                }
+            }
+            return flipped
+        }
+    }
+
+    private func clearScrollOverrides(on services: [HIDPointerService]) -> Bool {
+        var ok = true
+        for service in services {
+            if !bridge.clearScrollCurves(on: service.ref) { ok = false }
+        }
+        return ok
+    }
+
+    @discardableResult
+    private func writeScroll(_ key: String, _ raw: Int32) -> Bool {
+        let live = parameters.readRaw(key)
+        if live == raw {
+            scrollLastWritten[key] = raw
+            persistScrollWrites()
+            return true
+        }
+        let wrote = parameters.writeRaw(key, raw)
+        if wrote {
+            scrollLastWritten[key] = raw
+        } else if let live {
+            scrollLastWritten[key] = live
+        }
+        persistScrollWrites()
+        return wrote
+    }
+
+    /// Table-based scroll path: scale the scroll acceleration index by the
+    /// amount, mirroring the pointer table path. No plausibility floor: scaled
+    /// writes are fenced off from the snapshot.
+    private func writeScrollScaled(_ key: String, amount: Double) -> Bool {
+        let base = scrollOriginalValue(forKey: key)
+        let scaled = max(1, Int32((Double(base) * amount).rounded()))
+        return writeScroll(key, min(scaled, base))
+    }
+
+    private func captureScrollOriginalsIfNeeded() {
+        var captured = false
+        for key in Self.managedScrollKeys {
+            guard let raw = parameters.readRaw(key), Self.isPlausibleOriginal(raw) else { continue }
+            // Never mistake Decelerate's own applied value for the user's
+            // original.
+            if scrollLastWritten[key] == raw { continue }
+            if scrollOriginals[key] != raw {
+                scrollOriginals[key] = raw
+                captured = true
+            }
+        }
+        if captured { persistScrollOriginals() }
+    }
+
+    private func persistScrollOriginals() {
+        if scrollOriginals.isEmpty {
+            store.clearScrollOriginals()
+        } else {
+            store.saveScrollOriginals(scrollOriginals)
+        }
+    }
+
+    private func persistScrollWrites() {
+        if scrollLastWritten.isEmpty {
+            store.clearScrollWrites()
+        } else {
+            store.saveScrollWrites(scrollLastWritten)
+        }
+    }
+
     // MARK: - Parameters
 
     @discardableResult
@@ -626,7 +1199,12 @@ final class AccelerationController {
     /// the index by the amount is exactly "amount of acceleration".
     private func writeScaled(_ key: String, amount: Double) -> Bool {
         let base = originalValue(forKey: key)
-        let scaled = max(8_192, Int32((Double(base) * amount).rounded()))
+        // No plausibility floor here: small amounts must interpolate near the
+        // table's identity entry, and flooring at 8192 froze the whole
+        // 0-18% slider range at one value. Scaled writes are still fenced off
+        // from the snapshot (implausible reads are never adopted as originals,
+        // and lastWritten marks our own output).
+        let scaled = max(1, Int32((Double(base) * amount).rounded()))
         // Scaling can only reduce the index, never raise it.
         return write(key, min(scaled, base))
     }
@@ -674,24 +1252,57 @@ final class AccelerationController {
 
     private func systemParameterChanged(_ key: String, _ raw: Int32) {
         guard !isTerminating else { return }
-        // Our own writes echo back; ignore them (and anything during the
-        // settling window, where macOS may report an equivalent value).
+        // Our own writes echo back; ignore them. Anything that arrives during
+        // the settling window is deferred instead of ignored: macOS rewrites
+        // these parameters while it creates a HID service, which is exactly
+        // when our own apply is settling.
         if lastWritten[key] == raw { return }
-        if Date() < suppressExternalChangesUntil { return }
+        if scrollLastWritten[key] == raw { return }
+        if Date() < suppressExternalChangesUntil {
+            // macOS rewrites these parameters exactly when it is creating a HID
+            // service, which is the same moment our own apply is settling. A
+            // dropped callback here leaves macOS's value in place while the app
+            // believes it already shaped the pointer, so re-apply once the
+            // window closes instead of ignoring it.
+            deferExternalChange()
+            return
+        }
         guard let pointerClass = Self.pointerClass(forParameterKey: key) else { return }
-        guard let amount = desired[pointerClass]?.accelerationAmount,
-              amount > Threshold.linear, amount < Threshold.native else { return }
         // A genuine external change is a good moment to re-enumerate: wake
         // rewrites can arrive around the same time, and a decision about the
         // shaping route must never be made from a stale event-system client.
         bridge.refresh()
-        if Self.isPlausibleOriginal(raw) {
-            originals[key] = raw
-            persistOriginals()
-            // For index-scaled classes, a new base index has to be rescaled.
-            if Self.route(for: bridge.pointerServices().filter { Self.pointerClass(for: $0) == pointerClass })
-                == .indexScaling {
-                _ = writeScaled(key, amount: amount)
+        if Self.isScrollParameterKey(key) {
+            guard let category = desired[pointerClass], !category.isScrollNative else { return }
+            if Self.isPlausibleOriginal(raw) {
+                scrollOriginals[key] = raw
+                persistScrollOriginals()
+                // A new base index has to be rescaled on the table path;
+                // curve paths keep the originals written back and need nothing.
+                let services = bridge.pointerServices()
+                let classServices = Self.scrollServices(for: pointerClass, in: services)
+                let tablePath = !classServices.allSatisfy { $0.hasNativeScrollCurves }
+                let sharedKeys = Self.scrollKeysResolvedByOtherClasses(than: pointerClass, in: services)
+                if tablePath, !sharedKeys.contains(key), !category.invertScroll,
+                   abs(category.scrollSpeedMultiplier - 1.0) < 0.01,
+                   category.scrollAccelerationAmount < Threshold.native {
+                    _ = writeScrollScaled(key, amount: category.scrollAccelerationAmount)
+                }
+            }
+        } else {
+            // Speed alone at 100% acceleration is still a real override, so the
+            // "is this class shaped at all" question -- not just the amount --
+            // decides whether an external rewrite has to be answered.
+            guard let category = desired[pointerClass],
+                  !category.isNative || abs(category.speedMultiplier - 1.0) >= 0.01 else { return }
+            if Self.isPlausibleOriginal(raw) {
+                originals[key] = raw
+                persistOriginals()
+                // For index-scaled classes, a new base index has to be rescaled.
+                if Self.route(for: bridge.pointerServices().filter { Self.pointerClass(for: $0) == pointerClass })
+                    == .indexScaling {
+                    _ = writeScaled(key, amount: category.accelerationAmount)
+                }
             }
         }
         guard !isReapplying else { return }
@@ -722,7 +1333,10 @@ final class AccelerationController {
         }
         let trackpad = parameters.readRaw(HIDPropertyKey.trackpadAcceleration)
         let mouse = parameters.readRaw(HIDPropertyKey.mouseAcceleration)
-        return "Trackpad: \(describe(trackpad)) · Mouse: \(describe(mouse))"
+        let trackpadScroll = parameters.readRaw(HIDPropertyKey.trackpadScrollAcceleration)
+        let mouseScroll = parameters.readRaw(HIDPropertyKey.mouseScrollAcceleration)
+        return "Trackpad: \(describe(trackpad)) · Mouse: \(describe(mouse))" +
+            "\nScroll — Trackpad: \(describe(trackpadScroll)) · Mouse: \(describe(mouseScroll))"
     }
 
     /// Live view of the pointer services Decelerate can shape (diagnostics).

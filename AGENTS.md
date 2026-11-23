@@ -43,6 +43,7 @@ Manual checks (all from the repo root):
 ```sh
 DECELERATE_DEBUG=1 dist/Decelerate.app/Contents/MacOS/Decelerate --quit-after 5
 python3 Tools/Probe/check-state.py
+python3 Tools/Probe/verify-applied.py
 ./Tools/Probe/filterlog.sh 10 10
 ./Tools/Probe/build.sh
 ```

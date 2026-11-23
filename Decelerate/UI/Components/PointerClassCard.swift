@@ -42,6 +42,53 @@ struct PointerClassCard: View {
         )
     }
 
+    private var scrollAmount: Double {
+        state.preferences(for: pointerClass).scrollAccelerationAmount
+    }
+
+    private var scrollSpeed: Double {
+        state.preferences(for: pointerClass).scrollSpeedMultiplier
+    }
+
+    private var scrollPercent: Int {
+        Int((scrollAmount * 100).rounded())
+    }
+
+    private var scrollSpeedText: String {
+        String(format: "%.2f×", scrollSpeed)
+    }
+
+    private var scrollSpeedPositionBinding: Binding<Double> {
+        Binding(
+            get: { SpeedScale.position(for: scrollSpeed) },
+            set: { position in
+                state.setScrollSpeedMultiplier(SpeedScale.speed(for: position), for: pointerClass)
+            }
+        )
+    }
+
+    private var scrollCaption: String {
+        if state.preferences(for: pointerClass).isScrollNative {
+            return "macOS default scrolling"
+        }
+        var parts: [String] = []
+        switch scrollPercent {
+        case 0:
+            parts.append("Linear scroll")
+        case 100:
+            parts.append("macOS scroll curve")
+        default:
+            parts.append("Blended scroll \(scrollPercent)%")
+        }
+        if abs(scrollSpeed - 1.0) >= 0.01 {
+            parts.append(scrollSpeedText)
+        }
+        if state.preferences(for: pointerClass).invertScroll {
+            parts.append("inverted")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private var accelerationCaption: String {
         switch percent {
         case 0:
@@ -133,6 +180,80 @@ struct PointerClassCard: View {
             }
             .font(.caption)
             .frame(maxWidth: .infinity, minHeight: 28, alignment: .topLeading)
+
+            Divider()
+
+            // Scroll shaping for this device class. The invert toggle is
+            // mouse-only: it negates the mouse wheel's scroll curves inside
+            // the HID pipeline, so the trackpad keeps macOS's direction.
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text("Scroll")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 8)
+
+                    Text("\(scrollPercent)%")
+                        .font(.callout)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 40, alignment: .trailing)
+                        .accessibilityHidden(true)
+                }
+
+                HStack(spacing: 6) {
+                    Text("Linear")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 34, alignment: .leading)
+                        .accessibilityHidden(true)
+
+                    Slider(value: state.binding(for: pointerClass).scrollAccelerationAmount, in: 0...1)
+                        .controlSize(.small)
+                        .accessibilityLabel("Scroll acceleration for \(pointerClass.title.lowercased())")
+
+                    Text("Default")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 44, alignment: .trailing)
+                        .accessibilityHidden(true)
+                }
+
+                HStack(spacing: 6) {
+                    Text("Speed")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 34, alignment: .leading)
+                        .accessibilityHidden(true)
+
+                    Slider(value: scrollSpeedPositionBinding, in: 0...1)
+                        .controlSize(.small)
+                        .accessibilityLabel("Scroll speed for \(pointerClass.title.lowercased())")
+                        .help("0.5×–2×, with 1.5× in the middle; 1× is macOS's own scroll distance")
+
+                    Text(scrollSpeedText)
+                        .font(.callout)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                        .accessibilityHidden(true)
+                }
+
+                if pointerClass == .mouse {
+                    Toggle("Invert scroll direction", isOn: state.binding(for: pointerClass).invertScroll)
+                        .font(.caption)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .accessibilityLabel("Invert mouse scroll direction")
+                        .help("Flips the mouse wheel only; the trackpad keeps its direction")
+                }
+
+                Text(scrollCaption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
