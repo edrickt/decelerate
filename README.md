@@ -68,7 +68,16 @@ patched.
   That is the table's own linear interpolation between identity and full
   acceleration. The Speed control cannot be applied on that path, so for those
   mice it only takes effect at 0%, where the constant-gain curve is installed.
-- Scroll acceleration is untouched. It is a separate HID parameter.
+- Scroll is shaped per class, and separately from the pointer. **Scroll** has an
+  acceleration amount (100% is macOS's own scroll curve, 0% is linear scrolling
+  at the Scroll speed) and a speed multiplier; mice also get **Invert scroll
+  direction**. macOS itself has one global Natural-scroll switch for every
+  device, so Decelerate's invert installs a negative-gain scroll curve on the
+  mouse services only and leaves the trackpad alone. That curve cannot carry an
+  acceleration blend (a negated curve only flips its odd powers, and its
+  high-velocity segment is a square root that cannot go negative), so while
+  Invert is on the Scroll amount slider is disabled and scrolling is linear at
+  the Scroll speed.
 - Decelerate re-applies its state if macOS rewrites the parameter, for example
   when you move the Tracking speed slider, after sleep, and when a device is
   attached. Sleep/wake recreates the HID services (the built-in trackpad comes
@@ -117,6 +126,13 @@ Click the cursor icon in the menu bar:
   slider. It scales the 1:1 movement, the Windows pointer-speed slider with
   "Enhance pointer precision" off. Default 1.5× (1× is geometry-true 1:1; raise
   it for faster movement).
+- **Scroll** per device class: **acceleration amount** (100% is macOS's own
+  scroll curve, 0% is linear scrolling), **speed** (0.5×–2×, 1× is macOS's own
+  scroll distance; default 1×) and, for mice, **Invert scroll direction**. The
+  two classes are independent, so a mouse wheel can be inverted while the
+  trackpad stays natural. Inverted scrolling is linear by construction, so the
+  Scroll amount does not apply while it is on; the slider is disabled and the
+  caption says so. Default: macOS scrolling, untouched.
 - **Settings…** (⌘,) opens the full window: launch at login, Dock icon,
   connected devices, live HID parameter state, and **Restore System Defaults**.
 - **Quit** (⌘Q) restores macOS acceleration.
@@ -142,7 +158,8 @@ Click the cursor icon in the menu bar:
 | `Tools/Probe/` | Read-only/research probes used to verify the behaviour |
 | `Scripts/` | Build, install, icon generation, window screenshots |
 
-Debug launch flags (development only):
+Debug launch flags, compiled into Debug builds only (`#if DEBUG`); the Release
+build ignores them, because several rewrite persisted settings or the login item:
 
 ```sh
 Decelerate.app/Contents/MacOS/Decelerate --preview-panel      # open the panel in a normal window

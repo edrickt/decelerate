@@ -14,9 +14,17 @@ Units / constants (straight from the source):
     with resolution = pointer resolution in dpi (IOFixed 400 here means 400.0) and
     rate = FRAME_RATE = 67.0 (constant in the source, not the device report rate).
   * the algorithm's multiplier() returns accelerated_speed * kCursorScale,
-    kCursorScale = 96/67.  The filter's applied gain is multiplier(v)/v.
-  * therefore the parametric curve S(v) produces gain g(v) = kCursorScale * S(v)/v,
-    and a true 1:1 curve needs GainLinear = 1/kCursorScale = 67/96 (not 1.0!).
+    kCursorScale = 96/67.  `Parametric.gain()` is in those filter units, which are
+    kCursorScale times the coefficient units described below.
+  * the applied ratio for a pure linear curve S = GL*v is
+    kCursorScale * GL / deviceScale = (96/67) * (67/400) * GL = (96/400) * GL, and
+    96/400 points per count is the physical 1:1 conversion of a 400-dpi device on a
+    96-dpi surface. So GainLinear = 1.0 IS the identity (Notes §12); the 96/67 and
+    67/400 factors cancel. The older `GL = 1/kCursorScale` claim in Notes §4 was
+    wrong, was reverted in Decelerate 1.2 and must not come back: it made every low
+    amount ~30 % slower than 1:1. `blend()` below models the shipped formula
+    (GL_f = 1 + f*(GL_n - 1)), and `Parametric.relative_gain()` reports gain in
+    coefficient units, where 1.0 is the identity.
 
 Segments (source comments + code):
   1) v <= TSL:              S(v) = GL*v + (GP*v)^2 + (GC*v)^3 + (GQ*v)^4
@@ -142,28 +150,49 @@ class Parametric:
             return math.sqrt(max(val, 0.0))
 
     def gain(self, v_std):
-        """Applied pointer gain = output/in for a given standardized velocity."""
+        """Filter output ratio kCursorScale*S(v)/v (kCursorScale times the
+        coefficient-domain gain; see `relative_gain` for the 1.0 = 1:1 form)."""
         if v_std <= 0:
             return KC * self.c["GL"]
         return KC * self.output_speed(v_std) / v_std
 
+    def relative_gain(self, v_std):
+        """S(v)/v, i.e. delivered movement as a multiple of the device's own
+        movement.
+
+        This is the unit the acceleration amount is defined in: 1.0 is the
+        physical identity (GainLinear = 1.0), which is what the shipped builder
+        emits at f = 0 and what the blend formula below is exact in.
+        """
+        if v_std <= 0:
+            return self.c["GL"]
+        return self.output_speed(v_std) / v_std
+
 
 def blend(native, f):
-    """Continuous acceleration-amount curve.
-    Desired: gain_f(v) = (1-f)*1 + f*gain_native(v),
-             equivalently S_f(v) = (1-f)*(v/KC) + f*S_native(v)
-    Representable exactly by scaling coefficients:
-      GL_f = (1-f)/KC + f*GL
-      GP_f = sqrt(f)*GP,  GC_f = f^(1/3)*GC,  GQ_f = f^(1/4)*GQ
-      TSL_f = TSL, TSPR_f = TSPR (breakpoints unchanged)
-    Segments 1 and 2 are then an exact blend of the native curve with the identity line.
-    Segment 3 is the sqrt curve tangent-matched at TSPR (the only approximation).
+    """Continuous acceleration-amount curve, exactly as the app ships it.
+
+    Shipped formula (Decelerate/Core/AccelerationCurveBuilder.swift):
+      GL_f = 1 + f*(GL_n - 1)           <- GainLinear 1.0 is the identity
+      GP_f = sqrt(f)   * GP_n
+      GC_f = f^(1/3)   * GC_n
+      GQ_f = f^(1/4)   * GQ_n
+      TSL_f = TSL_n, TSPR_f = TSPR_n    (the app moves TSPR out at f < 0.25;
+                                         see AccelerationCurveBuilder.tailScale)
+
+    Desired: relative_gain_f(v) = (1-f)*1 + f*relative_gain_native(v).
+    Segments 1 and 2 are then an exact blend of the native curve with the
+    identity line; segment 3 is the sqrt curve tangent-matched at TSPR (the only
+    approximation).
+
+    The retracted `GL_f = (1-f)/kCursorScale + f*GL_n` from Notes §4 is NOT this
+    formula; it made every low amount ~30 % slower than 1:1 (Notes §12).
     """
     if f <= 0:
-        return dict(Index=0, GL=1.0 / KC, GP=0.0, GC=0.0, GQ=0.0, TSL=0.0, TSPR=0.0)
+        return dict(Index=0, GL=1.0, GP=0.0, GC=0.0, GQ=0.0, TSL=0.0, TSPR=0.0)
     if f >= 1:
         return dict(native, Index=0)
-    root = {"GL": (1 - f) / KC + f * native["GL"],
+    root = {"GL": 1.0 + f * (native["GL"] - 1.0),
             "GP": math.sqrt(f) * native["GP"],
             "GC": f ** (1.0 / 3.0) * native["GC"],
             "GQ": f ** 0.25 * native["GQ"],
@@ -174,7 +203,8 @@ def blend(native, f):
 
 
 def ideal_gain(native_alg, f, v):
-    return (1 - f) + f * native_alg.gain(v)
+    """The blend target in coefficient units: (1-f)*1 + f*relative_gain_native."""
+    return (1 - f) + f * native_alg.relative_gain(v)
 
 
 def to_fixed(x):
@@ -208,15 +238,16 @@ def main():
     print()
 
     # Sanity: native gain at sample standardized velocities.
-    print("## Native (f=1) gain g(v) at standardized velocities")
+    print("## Native (f=1) gain g(v) at standardized velocities (coefficient units)")
     vs = [0.5, 1, 2, 4, 7, 10, 14, 20, 30, 50, 80]
     print("v_std  " + "  ".join(f"{v:7.2f}" for v in vs))
-    print("g_nat  " + "  ".join(f"{nat.gain(v):7.3f}" for v in vs))
+    print("g_nat  " + "  ".join(f"{nat.relative_gain(v):7.3f}" for v in vs))
     print()
 
     # Rebuild each blended curve from its own coefficients (as the filter will) and
     # compare against the ideal blend.
     print("## Blend check: rebuilt-from-coefficients vs ideal (1-f)+f*g_native")
+    print("## (coefficient units: 1.0 = physical 1:1, the shipped f=0 curve)")
     print("f      max|err| over v in [0.01,80]   at v   g(v)@v=2   g(v)@v=7   g(v)@v=14  g(v)@v=30")
     for f in (0.1, 0.25, 0.5, 0.75, 0.9, 1.0):
         blendc = blend(native, f)
@@ -224,18 +255,19 @@ def main():
         maxerr, atv = 0.0, 0.0
         for i in range(1, 8000):
             v = i / 100.0
-            err = abs(alg.gain(v) - ideal_gain(nat, f, v))
+            err = abs(alg.relative_gain(v) - ideal_gain(nat, f, v))
             if err > maxerr:
                 maxerr, atv = err, v
         print(f"{f:<5.2f}  {maxerr:<10.6g}                {atv:<7.2f} "
-              f"{alg.gain(2):9.4f} {alg.gain(7):9.4f} {alg.gain(14):9.4f} {alg.gain(30):9.4f}")
+              f"{alg.relative_gain(2):9.4f} {alg.relative_gain(7):9.4f} "
+              f"{alg.relative_gain(14):9.4f} {alg.relative_gain(30):9.4f}")
     print()
 
-    # f=0 identity proof
+    # f=0 identity proof: the shipped constant curve is GL = 1.0 (Notes §12).
     ident = Parametric(blend(native, 0.0))
-    print("## f=0 identity curve check (GL = 1/kCursorScale = 67/96)")
+    print("## f=0 identity curve check (GL = 1.0; the shipped constant-gain curve)")
     print("f=0 curve fixed dict:", curve_dict_fixed(blend(native, 0.0)))
-    errs = [abs(ident.gain(v) - 1.0) for v in [0.01, 0.1, 1, 7, 14, 30, 80, 500]]
+    errs = [abs(ident.relative_gain(v) - 1.0) for v in [0.01, 0.1, 1, 7, 14, 30, 80, 500]]
     print(f"max |gain-1| = {max(errs):.3e}  (expect ~0)")
     print()
 
@@ -264,12 +296,12 @@ def main():
         cross = None
         v = 0.5
         while v < 500:
-            if a.gain(v) < 1.0:
+            if a.relative_gain(v) < 1.0:
                 cross = v
                 break
             v += 0.25
-        gmax = max(a.gain(x / 10.0) for x in range(1, 8000))
-        print(f"accel={av:<6} g(2)={a.gain(2):6.3f} g(7)={a.gain(7):6.3f} "
+        gmax = max(a.relative_gain(x / 10.0) for x in range(1, 8000))
+        print(f"accel={av:<6} g(2)={a.relative_gain(2):6.3f} g(7)={a.relative_gain(7):6.3f} "
               f"max g={gmax:6.3f}  first v where g<1: {cross if cross else '>500'}")
     print()
 
@@ -308,7 +340,7 @@ def gain_error_stats(alg, nat, f, vmax=150.0, step=0.05):
     maxerr, atv = 0.0, 0.0
     v = step
     while v <= vmax:
-        err = abs(alg.gain(v) - ideal_gain(nat, f, v))
+        err = abs(alg.relative_gain(v) - ideal_gain(nat, f, v))
         if err > maxerr:
             maxerr, atv = err, v
         v += step
@@ -343,7 +375,7 @@ def analysis():
     for f in (0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99):
         alg = Parametric(blend(native, f))
         err, atv = gain_error_stats(alg, nat, f)
-        ming = min(alg.gain(x / 10.0) for x in range(1, 1501))
+        ming = min(alg.relative_gain(x / 10.0) for x in range(1, 1501))
         print(f"{f:<5.2f} {err:<24.6f} {atv:<8.2f} {ming:8.4f}")
     print()
     print("## Scheme B: per-f optimized TSPR (TSL kept native), vmax=150")
@@ -364,12 +396,14 @@ def analysis():
         line = f"f={f:<4.2f}"
         for v in (7, 14, 30, 60, 100, 150):
             ideal = ideal_gain(nat, f, v)
-            line += f"  v{v}: A={a.gain(v):6.2f} B={b.gain(v):6.2f} ideal={ideal:6.2f}"
+            line += (f"  v{v}: A={a.relative_gain(v):6.2f} "
+                     f"B={b.relative_gain(v):6.2f} ideal={ideal:6.2f}")
         print(line)
     print()
     print("## Monotonicity in f (fixed v): gain_f must increase from 1 to g_native")
     for v in (2, 7, 14, 30, 60):
-        gs = [Parametric(blend(native, f)).gain(v) for f in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)]
+        gs = [Parametric(blend(native, f)).relative_gain(v)
+              for f in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)]
         mono = all(gs[i] <= gs[i + 1] + 1e-9 for i in range(len(gs) - 1))
         print(f"v={v:<4} monotone: {mono}  g: " + " ".join(f"{g:.2f}" for g in gs))
     print()
@@ -378,7 +412,8 @@ def analysis():
     for label, cc in (("TSL=TSPR=0 (exact)", c0),
                       ("native TSL/TSPR", dict(c0, TSL=native["TSL"], TSPR=native["TSPR"]))):
         a = Parametric(cc)
-        print(f"  {label}: gain(30)={a.gain(30):.4f} gain(100)={a.gain(100):.4f}")
+        print(f"  {label}: gain(30)={a.relative_gain(30):.4f} "
+              f"gain(100)={a.relative_gain(100):.4f}")
     print()
     print("## Breakpoint/coefficient continuity proof by construction")
     print("  m0_f = (1-f)/KC + f*m0_n     b0_f = f*b0_n")
@@ -494,15 +529,22 @@ def mouse_gain_table(default_table_bytes, accel_value):
 
 
 def fit_parametric(target_gain, f, tsl=7.0, tspr=14.0, fit_max=7.0):
-    """Least-squares fit of the f1 polynomial (GL,GP,GC) to target S(v)=v*g(v)/KC
-    over [0.2, fit_max], then evaluate the rebuilt algorithm."""
+    """Least-squares fit of the f1 polynomial (GL,GP,GC) to the blend target
+    S(v) = v*g(v) over [0.2, fit_max], then evaluate the rebuilt algorithm.
+
+    `target_gain` is a gain in coefficient units (1.0 = physical 1:1), which is
+    the unit the shipped builder works in, so this fit is comparable with
+    `blend()` (Notes §12: the retracted 1/kCursorScale factor is not applied).
+    It is a derivation experiment for a hypothetical parametric mouse curve; the
+    app itself uses table index scaling for mice, so nothing ships from here.
+    """
     import itertools
     xs, ys = [], []
     v = 0.2
     while v <= fit_max:
         target = 1.0 + f * (target_gain(v) - 1.0)
         xs.append(v)
-        ys.append(v * target / KC)
+        ys.append(v * target)
         v += 0.02
     # S = GL*v + GP^2*v^2 + GC^3*v^3, linear in u=[GL,GP^2,GC^3]
     A = [[x, x * x, x ** 3] for x in xs]
@@ -530,7 +572,7 @@ def fit_parametric(target_gain, f, tsl=7.0, tspr=14.0, fit_max=7.0):
     v = 0.05
     while v <= 150:
         ideal = 1.0 + f * (target_gain(v) - 1.0)
-        g = alg.gain(v)
+        g = alg.relative_gain(v)
         if abs(g - ideal) > maxerr:
             maxerr, atv = abs(g - ideal), v
         ming = min(ming, g)
@@ -563,7 +605,8 @@ def mouse_analysis():
     nat = Parametric(native)
     for f in (0.0, 0.25, 0.5, 0.75, 1.0):
         alg = Parametric(blend(native, f))
-        print(f"f={f:<4.2f} " + "  ".join(f"v{v}:{alg.gain(v):6.3f}" for v in (2, 7, 14, 30, 60)))
+        print(f"f={f:<4.2f} " + "  ".join(f"v{v}:{alg.relative_gain(v):6.3f}"
+                                            for v in (2, 7, 14, 30, 60)))
 
 
 if __name__ == "__main__":

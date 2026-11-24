@@ -17,27 +17,33 @@ filter's user-curve property (verified route) plus a source-derived blend formul
 | 1–99 % | install one blended curve via per-service `UserPointerAccelCurvesKey` (formula §4) | same, using the mouse's native curve | **do not ship intermediates**: keep 0 % / 100 % only (see §6); table baseline cannot be reproduced safely |
 | 100 % | clear curves (`UserPointerAccelCurvesKey` = empty array) → filter falls back to native `HIDAccelCurves` | clear curves → native | clear curves → native table |
 
-Critical correction to the earlier coefficient formula: the identity term must be
-scaled by `1/kCursorScale = 67/96`, not 1. The filter multiplies every algorithmic
-output by `kCursorScale = 96/67` (`IOHIDAccelerationAlgorithm.hpp: kCursorScale`;
-`multiplier()` returns `... * kCursorScale`). Therefore a 1:1 parametric curve needs
-`GainLinear = 67/96`, and the blend is
+Coefficient formula actually shipped (this supersedes the `1/kCursorScale` form
+this section originally proposed; see §12 for the derivation and §13 for why the
+wrong one was replaced):
 
 ```
-GL' = (1-f)/KC + f*GL_n
+GL' = 1 + f*(GL_n - 1)          # GainLinear 1.0 is the physical 1:1 identity
 GP' = sqrt(f)  * GP_n
 GC' = f^(1/3)  * GC_n
 GQ' = f^(1/4)  * GQ_n
-TSL' = TSL_n, TSPR' = TSPR_n   (see §5 for f<0.25 tail handling)
+TSL' = TSL_n, TSPR' = TSPR_n   (the app pushes TSPR out for f < 0.25, §5)
 ```
 
-where `KC = 96/67`. If you use `GL' = 1 + f*(GL−1)` the slider jumps from true 1:1
-(gain 1.0 at f=0, the disabled mechanism) to gain ≈ `KC` = 1.43 at f→0+. Evidence for
-the 1/`KC` identity factor: `IOHIDSimpleAccelerator(value)` multiplies deltas by
-value directly, and the linear-scaling path is documented/implemented as
-`delta_out = delta_in * HIDMouseAcceleration`, so value 1.0 is raw passthrough
-(gain 1.0). The parametric algorithm's `multiplier()` adds `kCursorScale`, so its
-coefficients live in different units.
+`kCursorScale = 96/67` is real (`IOHIDAccelerationAlgorithm.hpp`; `multiplier()`
+returns `... * kCursorScale`), but it does not make `1/kCursorScale` the identity:
+for a linear curve the delivered ratio is `kCursorScale * GL / deviceScale` and
+`(96/67)·(67/400) = 96/400 = 0.24` points/count is exactly the physical 1:1
+conversion of a 400-dpi device on a 96-dpi surface, so `GL = 1.0` is the identity
+(§12). The `1/kCursorScale` version made every low amount ~30 % slower than 1:1 and
+was reverted in 1.2; `Tools/Probe/curve_math.py` now generates this formula, not
+the old one. The old text is preserved for history below.
+
+> **Historical (1.1):** "the identity term must be scaled by `1/kCursorScale =
+> 67/96`, not 1 … therefore a 1:1 parametric curve needs `GainLinear = 67/96`, and
+> the blend is `GL' = (1-f)/KC + f*GL_n` … if you use `GL' = 1 + f*(GL−1)` the
+> slider jumps from true 1:1 to gain ≈ `KC` = 1.43 at f→0+." That conclusion was
+> wrong: the ×96/67 and ×67/400 factors cancel, so `GL = 1` is both the disabled
+> mechanism and the 1:1 curve.
 
 ---
 
@@ -393,23 +399,34 @@ instead. If you do get the pointer filter's serialize dict, expect for our singl
 
 | f | Class | AccelIndex | GainLinear | GainCubic | GainParabolic | TangentSpeedLinear | TangentSpeedParabolicRoot |
 |---|---|---|---|---|---|---|---|
-| 0.00 | IOHIDParametricAcceleration | 0 | 45739 | 0 | 0 | 0 | 0 |
-| 0.25 | IOHIDParametricAcceleration | 0 | 48394 | 9909 | 47514 | 458752 | 917504 |
-| 0.50 | IOHIDParametricAcceleration | 0 | 51050 | 12484 | 67194 | 458752 | 917504 |
-| 0.75 | IOHIDParametricAcceleration | 0 | 53705 | 14291 | 82296 | 458752 | 917504 |
+| 0.00 | IOHIDParametricAcceleration | 0 | 65536 | 0 | 0 | 0 | 0 |
+| 0.25 | IOHIDParametricAcceleration | 0 | 63242 | 9909 | 47514 | 458752 | 917504 |
+| 0.50 | IOHIDParametricAcceleration | 0 | 60948 | 12484 | 67194 | 458752 | 917504 |
+| 0.75 | IOHIDParametricAcceleration | 0 | 58655 | 14291 | 82296 | 458752 | 917504 |
 | 1.00 (native selection, no user curves) | IOHIDParametricAcceleration | 131072 | 56361 | 15729 | 95027 | 458752 | 917504 |
+
+Regenerated from the shipping formula (`GL' = 1 + f·(GL_n − 1)`, Notes §12) with
+`Tools/Probe/curve_math.py`, not from the retracted §4 `1/kCursorScale` form: the
+f = 0 row is `GainLinear = 65536` (1.0), and the intermediate rows differ from the
+§4 curve by `(1−f)/kCursorScale`. `TangentSpeedParabolicRoot` here is the native
+breakpoint; the app pushes it out at f < 0.25 (`AccelerationCurveBuilder.tailScale`).
 
 (All values raw IOFixed = round(double*65536).)
 
-Gain tables (filter-domain gain, raw passthrough = 1.0; trackpad baseline 2.0):
+Gain tables (coefficient units `S(v)/v`: 1.0 = `GainLinear` 1.0 = physical 1:1;
+trackpad baseline 2.0). Same numbers `curve_math.py` prints as `relative_gain`:
 
 | v_std | 2 | 7 | 14 | 30 | 60 |
 |---|---|---|---|---|---|
 | f=0 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| f=0.25 | 2.584 | 6.573 | 9.451 | 8.801 | 6.823 |
-| f=0.50 | 4.168 | 12.145 | 17.903 | 16.752 | 13.000 |
-| f=0.75 | 5.752 | 17.718 | 26.354 | 24.703 | 19.176 |
-| f=1 (native) | 7.337 | 23.291 | 34.805 | 32.654 | 25.352 |
+| f=0.25 | 2.030 | 4.814 | 6.823 | 6.335 | 4.908 |
+| f=0.50 | 3.060 | 8.627 | 12.646 | 11.820 | 9.170 |
+| f=0.75 | 4.090 | 12.441 | 18.468 | 17.305 | 13.432 |
+| f=1 (native) | 5.120 | 16.255 | 24.291 | 22.790 | 17.694 |
+
+Multiplying these by `kCursorScale/deviceScale = (96/67)/(400/67) = 0.24` gives the
+delivered points per device count (Notes §12), so f = 0 is 0.24 points/count, the
+geometry-true 1:1 conversion of a 400-dpi device on a 96-dpi surface.
 
 (v_std 2 ≈ 3.6 in/s, 7 ≈ 12.5 in/s, 14 ≈ 25 in/s for a 120 Hz report-rate trackpad;
 see `curve_math.py` for the conversion.)
@@ -488,16 +505,24 @@ clear when the slider is at 100 % or the feature is off.
 
 ---
 
-## 11. Implementation note: Decelerate 1.1 (Lead)
+## 11. Implementation note: Decelerate 1.1 (Lead) — HISTORICAL
 
-The shipped app follows §1–§6 for trackpads and any device exposing
+> **Superseded by §12.** This section describes the 1.1 build, whose coefficients
+> came from the §4 formula `GL' = (1−f)/kCursorScale + f·GL_n`. That formula was
+> found to be wrong (it made every low amount ~30 % slower than 1:1) and was
+> reverted in 1.2; §12 explains why `GL = 1.0` is the identity. Anything that
+> regenerates the blend must use `GL' = 1 + f·(GL_n − 1)`, which is what
+> `AccelerationCurveBuilder` and `Tools/Probe/curve_math.py` now implement. The
+> statement below that the coefficients "match `trackpad-accel-amount-table.json`
+> byte-for-byte for f = 0.25 and 0.5" was true of the 1.1 build only, and the JSON
+> in `Tools/Probe/out/` is that retracted curve.
+
+The 1.1 app followed §1–§6 for trackpads and any device exposing
 `HIDAccelCurves`: 0% = negative acceleration value (hard 1:1), 1–99% = one
 `UserPointerAccelCurvesKey` write with the blended 10-curve array (so the macOS
 tracking-speed index still selects/ interpolates curves), 100% = empty array
-(native fallback). All coefficients come from the §4 corrected formula
-(`GL' = (1−f)/kCursorScale + f·GL_n`, …) and match
-`Tools/Probe/out/trackpad-accel-amount-table.json` byte-for-byte for f = 0.25
-and 0.5 (verified).
+(native fallback). All coefficients came from the §4 corrected formula
+(`GL' = (1−f)/kCursorScale + f·GL_n`, …).
 
 Table-only mice use a different, simpler route than the parametric fit
 discussed in §6: the table's own interpolation is linear in the acceleration
