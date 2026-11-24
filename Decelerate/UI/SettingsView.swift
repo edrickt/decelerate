@@ -48,6 +48,19 @@ private struct GeneralSettingsTab: View {
                 Text("Launch Decelerate automatically when you log in. The Dock icon is optional for a menu bar app.")
             }
 
+            if state.launchItemNeedsApproval {
+                // `register()` succeeded but macOS still requires the user to
+                // switch the item on, so the app will not start until that
+                // happens. Saying so is the whole point of this notice.
+                InlineBanner(
+                    systemImage: "exclamationmark.triangle.fill",
+                    tint: .orange,
+                    title: "Approve Launch at Login",
+                    message: "macOS has registered Decelerate as a login item but is waiting for your approval. "
+                        + "Turn it on in System Settings → General → Login Items, or it will not start at login."
+                )
+            }
+
             Section {
                 LabeledContent("Status") {
                     StatusBadge(status: state.status, label: state.statusPillLabel)
@@ -188,7 +201,7 @@ private struct AboutSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 DisclosureGroup("How it works", isExpanded: $isShowingHowItWorks) {
-                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% replaces the acceleration curve with a flat gain so movement stays linear and only the Speed control scales it, 100% is macOS's own acceleration curve, and intermediate values mix the two. A separate Speed control (0.5×–2×, with 1.5× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). Scroll works the same way per device class through the scroll accelerator: an acceleration blend plus speed, with an optional mouse-only direction invert that negates the wheel's scroll curves while the trackpad keeps its direction. No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
+                    Text("Decelerate tells macOS's HID event system how much pointer acceleration to apply: 0% replaces the acceleration curve with a flat gain so movement stays linear and only the Speed control scales it, 100% is macOS's own acceleration curve, and intermediate values mix the two. A separate Speed control (0.5×–2×, with 1.5× in the middle) scales 1:1 movement, since macOS's unaccelerated pointer is slower at ordinary hand speed (Windows has the same pointer-speed slider with Enhance pointer precision off). Scroll works the same way per device class through the scroll accelerator: an acceleration blend plus speed, with an optional mouse-only direction invert that flips the wheel's scroll curve while the trackpad keeps its direction (an inverted curve is linear, so the Scroll amount is not applied while it is on). No events are intercepted, no permissions are needed, and quitting Decelerate restores the original settings.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

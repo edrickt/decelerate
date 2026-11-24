@@ -69,7 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppState.shared.start()
+        #if DEBUG
+        // QA-only launch flags. Compiled out of Release: `--restore-defaults`
+        // and `--test-login-item` rewrite persisted settings and the login item,
+        // so a user or a support script must not be able to trigger them from a
+        // shipping build.
         handleDebugArguments()
+        #endif
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -80,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Development previews
     //
+    // Everything below is Debug-only (see `applicationDidFinishLaunching`).
     // Launching the app with one of these flags opens the UI in a plain window,
     // which makes it possible to iterate on the interface (and screenshot it)
     // without clicking through the menu bar item.
@@ -89,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     //   Decelerate.app/Contents/MacOS/Decelerate --show-settings
     //   Decelerate.app/Contents/MacOS/Decelerate --restore-defaults
 
+    #if DEBUG
     private func handleDebugArguments() {
         let arguments = CommandLine.arguments
         // QA hook: exercise the Settings "Restore System Defaults" action from a
@@ -195,4 +203,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         SettingsPresenter.activate()
     }
+    #endif
 }

@@ -46,6 +46,15 @@ final class AppState: ObservableObject {
             updateLaunchAtLogin(launchAtLogin)
         }
     }
+    /// True when macOS has the login item registered but still needs the user to
+    /// approve it in System Settings → General → Login Items.
+    ///
+    /// `SMAppService.register()` does not throw for that case, and only `.enabled`
+    /// means the app will actually start at login, so "register() returned" is
+    /// not the same as "it will run". The toggle stays on (the intent is
+    /// registered) and this flag drives a notice that says what macOS is waiting
+    /// for.
+    @Published private(set) var launchItemNeedsApproval = false
     @Published var showDockIcon: Bool {
         didSet {
             guard !isApplyingExternalChanges else { return }
@@ -60,6 +69,22 @@ final class AppState: ObservableObject {
     private let controller: AccelerationController
     private var isApplyingExternalChanges = false
     private var hasStarted = false
+    /// Rapid preference changes are coalesced into at most one apply per
+    /// interval, with a trailing apply so the last chosen value always wins.
+    ///
+    /// An apply runs HID parameter writes that cost ~10 ms each on the main
+    /// thread, and the table-only mouse path performs two of them plus the
+    /// persistence work, so one apply per slider tick (60/s while dragging) is
+    /// what made the sliders hitch. 30 Hz still feels immediate, and a slider
+    /// being dragged is held to 4 Hz with an immediate apply when the drag ends
+    /// (`beginInteractiveChange`), which is what keeps a whole drag from being
+    /// two HID writes per frame.
+    private static let reapplyInterval: TimeInterval = 1.0 / 30
+    /// Ceiling while a slider is being dragged; the drag end applies at once.
+    private static let interactiveReapplyInterval: TimeInterval = 0.25
+    private var lastReapplyAt = Date.distantPast
+    private var pendingReapply: DispatchWorkItem?
+    private var isInteracting = false
 
     private init(store: PreferencesStore = PreferencesStore()) {
         self.store = store
@@ -95,6 +120,8 @@ final class AppState: ObservableObject {
     /// the next launch.
     func prepareForTermination() {
         DebugLog.write("prepareForTermination: restoring")
+        pendingReapply?.cancel()
+        pendingReapply = nil
         controller.prepareForTermination()
         DebugLog.write("prepareForTermination: restored, error=\(controller.lastError ?? "none")")
     }
@@ -142,7 +169,9 @@ final class AppState: ObservableObject {
             let category = preferences(for: pointerClass)
             guard !category.isScrollNative else { return nil }
             var text = "\(pointerClass.title) scroll"
-            if category.scrollAccelerationAmount < 0.995 {
+            // An inverted scroll curve is a constant negative gain, so no blend
+            // is applied and claiming an amount would be wrong.
+            if !category.invertScroll, category.scrollAccelerationAmount < 0.995 {
                 text += " \(Int((category.scrollAccelerationAmount * 100).rounded()))%"
             }
             if abs(category.scrollSpeedMultiplier - 1.0) >= 0.01 {
@@ -252,6 +281,43 @@ final class AppState: ObservableObject {
     }
 
     func reapply() {
+        let interval = isInteracting ? Self.interactiveReapplyInterval : Self.reapplyInterval
+        let elapsed = Date().timeIntervalSince(lastReapplyAt)
+        if elapsed >= interval {
+            lastReapplyAt = Date()
+            pendingReapply?.cancel()
+            pendingReapply = nil
+            applyNow()
+            return
+        }
+        guard pendingReapply == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingReapply = nil
+            self.lastReapplyAt = Date()
+            self.applyNow()
+        }
+        pendingReapply = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + (interval - elapsed), execute: item)
+    }
+
+    /// Called when a slider drag starts (true) and ends (false). While a drag is
+    /// in progress applies are coalesced much harder, and the end of the drag
+    /// applies immediately so the released value is the one that is installed.
+    func beginInteractiveChange() {
+        isInteracting = true
+    }
+
+    func endInteractiveChange() {
+        guard isInteracting else { return }
+        isInteracting = false
+        lastReapplyAt = Date()
+        pendingReapply?.cancel()
+        pendingReapply = nil
+        applyNow()
+    }
+
+    private func applyNow() {
         controller.apply(preferences)
         refreshStatus()
     }
@@ -301,22 +367,59 @@ final class AppState: ObservableObject {
             } else {
                 try SMAppService.mainApp.unregister()
             }
-            store.launchAtLogin = enabled
+            applyLoginItemStatus(SMAppService.mainApp.status, requested: enabled)
         } catch {
             // Revert the toggle so the UI never lies about the real state.
             isApplyingExternalChanges = true
             launchAtLogin = store.launchAtLogin
+            launchItemNeedsApproval = false
             isApplyingExternalChanges = false
             lastError = "Could not update login item: \(error.localizedDescription)"
+        }
+    }
+
+    /// Maps the real `SMAppService` status onto the toggle and the approval
+    /// notice. Re-read after every register/unregister: a successful `register()`
+    /// that still requires approval must not be reported as "will start at
+    /// login".
+    private func applyLoginItemStatus(_ status: SMAppService.Status, requested: Bool) {
+        isApplyingExternalChanges = true
+        defer { isApplyingExternalChanges = false }
+        switch status {
+        case .enabled:
+            launchAtLogin = true
+            launchItemNeedsApproval = false
+            store.launchAtLogin = true
+        case .requiresApproval:
+            launchAtLogin = true
+            launchItemNeedsApproval = true
+            store.launchAtLogin = true
+        default:
+            launchAtLogin = false
+            launchItemNeedsApproval = false
+            store.launchAtLogin = false
+            if requested { lastError = "macOS did not register Decelerate as a login item." }
         }
     }
 
     private func syncLaunchAtLoginFromSystem() {
         isApplyingExternalChanges = true
         defer { isApplyingExternalChanges = false }
-        if SMAppService.mainApp.status == .enabled {
+        let status = SMAppService.mainApp.status
+        if status == .enabled {
             launchAtLogin = true
+            launchItemNeedsApproval = false
             store.launchAtLogin = true
+            return
+        }
+        if status == .requiresApproval {
+            // Already registered; macOS is only waiting for the user, so
+            // re-registering cannot help. Keep the intent and say what is
+            // pending instead of claiming the app will start at login.
+            launchAtLogin = true
+            launchItemNeedsApproval = true
+            store.launchAtLogin = true
+            DebugLog.write("launch-at-login: registered, macOS requires approval")
             return
         }
         // A bundle that was moved, re-installed or restored from a backup loses
@@ -329,15 +432,20 @@ final class AppState: ObservableObject {
         if store.launchAtLogin, Self.isInstalledLocation {
             do {
                 try SMAppService.mainApp.register()
+                let registered = SMAppService.mainApp.status
                 launchAtLogin = true
+                launchItemNeedsApproval = registered == .requiresApproval
                 store.launchAtLogin = true
-                DebugLog.write("launch-at-login: re-registered after the bundle moved")
+                DebugLog.write(
+                    "launch-at-login: re-registered after the bundle moved, status=\(registered.rawValue)"
+                )
                 return
             } catch {
                 DebugLog.write("launch-at-login: re-register failed: \(error.localizedDescription)")
             }
         }
         launchAtLogin = false
+        launchItemNeedsApproval = false
         // Keep the stored intent when running from an uninstalled copy; a
         // later install from a stable location should still restore it.
         if Self.isInstalledLocation { store.launchAtLogin = false }

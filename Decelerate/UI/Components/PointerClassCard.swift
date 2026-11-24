@@ -58,6 +58,22 @@ struct PointerClassCard: View {
         String(format: "%.2f×", scrollSpeed)
     }
 
+    private var isInvertedScroll: Bool {
+        state.preferences(for: pointerClass).invertScroll
+    }
+
+    /// Coalesces the applies of a slider drag: the model applies at a much lower
+    /// rate while the thumb is held, then once more when it is released.
+    private var editHandler: (Bool) -> Void {
+        { editing in
+            if editing {
+                state.beginInteractiveChange()
+            } else {
+                state.endInteractiveChange()
+            }
+        }
+    }
+
     private var scrollSpeedPositionBinding: Binding<Double> {
         Binding(
             get: { SpeedScale.position(for: scrollSpeed) },
@@ -68,22 +84,31 @@ struct PointerClassCard: View {
     }
 
     private var scrollCaption: String {
-        if state.preferences(for: pointerClass).isScrollNative {
+        let category = state.preferences(for: pointerClass)
+        if category.isScrollNative {
             return "macOS default scrolling"
         }
         var parts: [String] = []
-        switch scrollPercent {
-        case 0:
+        if category.invertScroll {
+            // Inverted scrolling installs a constant negative-gain curve: a
+            // negated blend cannot stay negative (see AccelerationController),
+            // so the installed curve has no acceleration sharing and the amount
+            // slider does not apply.
             parts.append("Linear scroll")
-        case 100:
-            parts.append("macOS scroll curve")
-        default:
-            parts.append("Blended scroll \(scrollPercent)%")
+        } else {
+            switch scrollPercent {
+            case 0:
+                parts.append("Linear scroll")
+            case 100:
+                parts.append("macOS scroll curve")
+            default:
+                parts.append("Blended scroll \(scrollPercent)%")
+            }
         }
         if abs(scrollSpeed - 1.0) >= 0.01 {
             parts.append(scrollSpeedText)
         }
-        if state.preferences(for: pointerClass).invertScroll {
+        if category.invertScroll {
             parts.append("inverted")
         }
         return parts.joined(separator: " · ")
@@ -142,9 +167,13 @@ struct PointerClassCard: View {
                     .frame(width: 34, alignment: .leading)
                     .accessibilityHidden(true)
 
-                Slider(value: state.binding(for: pointerClass).accelerationAmount, in: 0...1)
-                    .controlSize(.small)
-                    .accessibilityLabel("Acceleration for \(pointerClass.title.lowercased())")
+                Slider(
+                    value: state.binding(for: pointerClass).accelerationAmount,
+                    in: 0...1,
+                    onEditingChanged: editHandler
+                )
+                .controlSize(.small)
+                .accessibilityLabel("Acceleration for \(pointerClass.title.lowercased())")
 
                 Text("Default")
                     .font(.caption2)
@@ -160,7 +189,7 @@ struct PointerClassCard: View {
                     .frame(width: 34, alignment: .leading)
                     .accessibilityHidden(true)
 
-                Slider(value: speedPositionBinding, in: 0...1)
+                Slider(value: speedPositionBinding, in: 0...1, onEditingChanged: editHandler)
                     .controlSize(.small)
                     .accessibilityLabel("Speed for \(pointerClass.title.lowercased())")
                     .help("0.5×–2×, with 1.5× in the middle; 1× is geometry-true 1:1")
@@ -184,8 +213,8 @@ struct PointerClassCard: View {
             Divider()
 
             // Scroll shaping for this device class. The invert toggle is
-            // mouse-only: it negates the mouse wheel's scroll curves inside
-            // the HID pipeline, so the trackpad keeps macOS's direction.
+            // mouse-only: it installs a negative-gain curve on the mouse wheel
+            // only, so the trackpad keeps macOS's direction.
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Text("Scroll")
@@ -194,7 +223,10 @@ struct PointerClassCard: View {
 
                     Spacer(minLength: 8)
 
-                    Text("\(scrollPercent)%")
+                    // While inverted the installed curve is a constant negative
+                    // gain, so the amount has nothing to shape. Showing a
+                    // percentage would claim a blend that is not applied.
+                    Text(isInvertedScroll ? "—" : "\(scrollPercent)%")
                         .font(.callout)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
@@ -209,9 +241,17 @@ struct PointerClassCard: View {
                         .frame(width: 34, alignment: .leading)
                         .accessibilityHidden(true)
 
-                    Slider(value: state.binding(for: pointerClass).scrollAccelerationAmount, in: 0...1)
-                        .controlSize(.small)
-                        .accessibilityLabel("Scroll acceleration for \(pointerClass.title.lowercased())")
+                    Slider(
+                        value: state.binding(for: pointerClass).scrollAccelerationAmount,
+                        in: 0...1,
+                        onEditingChanged: editHandler
+                    )
+                    .controlSize(.small)
+                    .disabled(isInvertedScroll)
+                    .accessibilityLabel("Scroll acceleration for \(pointerClass.title.lowercased())")
+                    .help(isInvertedScroll
+                        ? "Inverted scroll uses a linear curve; the amount is not applied"
+                        : "0% is linear scrolling, 100% is macOS's own scroll curve")
 
                     Text("Default")
                         .font(.caption2)
@@ -227,7 +267,7 @@ struct PointerClassCard: View {
                         .frame(width: 34, alignment: .leading)
                         .accessibilityHidden(true)
 
-                    Slider(value: scrollSpeedPositionBinding, in: 0...1)
+                    Slider(value: scrollSpeedPositionBinding, in: 0...1, onEditingChanged: editHandler)
                         .controlSize(.small)
                         .accessibilityLabel("Scroll speed for \(pointerClass.title.lowercased())")
                         .help("0.5×–2×, with 1.5× in the middle; 1× is macOS's own scroll distance")
@@ -246,7 +286,8 @@ struct PointerClassCard: View {
                         .toggleStyle(.switch)
                         .controlSize(.small)
                         .accessibilityLabel("Invert mouse scroll direction")
-                        .help("Flips the mouse wheel only; the trackpad keeps its direction")
+                        .help("Flips the mouse wheel only; the trackpad keeps its direction. "
+                            + "Inverted scrolling is linear, so the Scroll amount does not apply.")
                 }
 
                 Text(scrollCaption)
