@@ -8,6 +8,9 @@
 //       raw HID values are also available) and can write a CSV of every event.
 //       Needs Accessibility/Input Monitoring TCC when run as a bare binary; no TCC
 //       needed when the process already has it (this research session does).
+//       A tap the system disables (timeout or user input) is re-enabled and
+//       counted; the run exits non-zero when that happened, because a truncated
+//       window is not a measurement.
 //
 //   tapmeasure post <dx> <count>
 //       Smoke test: posts synthetic mouse-moved CGEvents (no HID acceleration applied),
@@ -48,6 +51,20 @@ func listen(seconds: Double, csvPath: String?) -> Int32 {
         guard let refcon else { return Unmanaged.passUnretained(event) }
         let box = Unmanaged<AnyObject>.fromOpaque(refcon).takeUnretainedValue()
         if let acc = box as? SampleAccumulator {
+            // The callback cannot keep up (timeout) or the system turned the tap
+            // off (Secure Input, a TCC change). Those pseudo-events are not
+            // samples: record the interruption and re-enable the tap, because a
+            // dead tap otherwise keeps the listen loop running to its deadline
+            // and prints statistics for whatever arrived before it stopped.
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                acc.disabledCount += 1
+                let reason = type == .tapDisabledByTimeout ? "timeout" : "user input"
+                FileHandle.standardError.write(
+                    "warning: event tap disabled by \(reason); re-enabling\n".data(using: .utf8)!
+                )
+                if let tap = acc.tap { CGEvent.tapEnable(tap: tap, enable: true) }
+                return nil
+            }
             let dx = event.getIntegerValueField(.mouseEventDeltaX)
             let dy = event.getIntegerValueField(.mouseEventDeltaY)
             acc.samples.append(Sample(t: CFAbsoluteTimeGetCurrent(), dx: dx, dy: dy, kind: "\(type.rawValue)"))
@@ -68,16 +85,22 @@ func listen(seconds: Double, csvPath: String?) -> Int32 {
     }
     let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+    // The callback re-enables a disabled tap, which needs the port.
+    accumulator.tap = tap
     CGEvent.tapEnable(tap: tap, enable: true)
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
         CFRunLoopRunInMode(.defaultMode, 0.05, true)
     }
+    // Remove the source before tearing the port down; invalidating a port that
+    // is still installed in the run loop is undefined.
+    CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
     CFMachPortInvalidate(tap)
 
     samples = accumulator.samples
     let dxs = samples.map { abs($0.dx) }.filter { $0 > 0 }
     print("events: \(samples.count)")
+    print("tap disabled: \(accumulator.disabledCount) time(s)")
     if !dxs.isEmpty {
         let sorted = dxs.sorted()
         func pct(_ p: Double) -> Int64 { sorted[Int(Double(sorted.count - 1) * p)] }
@@ -104,11 +127,24 @@ func listen(seconds: Double, csvPath: String?) -> Int32 {
         try? csv.write(toFile: csvPath, atomically: true, encoding: .utf8)
         print("wrote \(csvPath)")
     }
+    if accumulator.disabledCount > 0 {
+        // A truncated window is not a measurement: say so and fail, instead of
+        // letting a partial sample set look like a result.
+        FileHandle.standardError.write(
+            "error: the event tap was disabled \(accumulator.disabledCount) time(s); this run is incomplete\n"
+                .data(using: .utf8)!
+        )
+        return 2
+    }
     return 0
 }
 
 final class SampleAccumulator {
     var samples: [Sample] = []
+    /// How often the system disabled the tap during the window.
+    var disabledCount = 0
+    /// The tap, so the callback can re-enable it.
+    var tap: CFMachPort?
 }
 
 func postSynthetic(dx: Int64, count: Int) -> Int32 {

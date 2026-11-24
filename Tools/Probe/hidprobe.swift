@@ -254,7 +254,14 @@ func makeValue(_ s: String) -> AnyObject? {
     }
     if s.hasPrefix("int:") { return NSNumber(value: Int64(s.dropFirst(4)) ?? 0) }
     if s.hasPrefix("fixed:") {
-        let d = Double(s.dropFirst(6)) ?? 0
+        let text = String(s.dropFirst(6))
+        // `Int32(Double)` traps on NaN/inf and on any value outside Int32, and
+        // this probe is documented for hand-typed values (`fixed:-1`), so the
+        // value is validated instead of converted blind.
+        guard let d = Double(text), d.isFinite, abs(d) <= 3.0 else {
+            print("fixed:\(text) is not a finite number in -3.0...3.0")
+            return nil
+        }
         return NSNumber(value: Int32(d * 65536.0))
     }
     if s.hasPrefix("bool:") { return NSNumber(value: s.dropFirst(5) == "true") }

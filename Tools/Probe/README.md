@@ -53,6 +53,14 @@ bin/hidprobe pointers                  # live pointer services + their registry 
 bin/hidprobe param-dump                # kernel-global HID parameters (readable!)
 bin/hidprobe param-set HIDTrackpadAcceleration fixed:-1   # DISABLE (raw -65536 = IOFixed -1.0)
 bin/hidprobe param-set HIDTrackpadAcceleration int:131072 # restore this machine's original 2.0
+```
+
+`fixed:` takes a plain number in `-3.0...3.0` and converts it to IOFixed. Anything
+else (NaN, inf, `fixed:1e6`) prints `bad value` and changes nothing: the HID
+parameters live in the range the app itself treats as plausible (`8192...196608`),
+and an out-of-range conversion used to trap.
+
+```bash
 ./filterlog.sh 10                      # watch the live filter flip between enabled/disabled
 ./tcc-test.sh                          # prove no TCC is needed
 ```
