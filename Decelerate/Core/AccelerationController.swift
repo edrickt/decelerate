@@ -80,6 +80,18 @@ final class AccelerationController {
     private var lastWritten: [String: Int32] = [:]
     /// Scroll values written by this controller (persisted), same protection.
     private var scrollLastWritten: [String: Int32] = [:]
+    /// Snapshots last handed to `UserDefaults`, so an unchanged set is not
+    /// re-encoded and rewritten. Every `persist*` call is a JSON encode plus a
+    /// defaults write on the main thread, and a slider drag used to trigger one
+    /// per HID parameter key plus four more per apply.
+    private var persistedOriginals: [String: Int32]?
+    private var persistedWrites: [String: Int32]?
+    private var persistedScrollOriginals: [String: Int32]?
+    private var persistedScrollWrites: [String: Int32]?
+    /// True while a multi-key apply or restore is running: per-key persistence
+    /// is deferred so the snapshots are written once at the end instead of once
+    /// per key.
+    private var isBatchingPersistence = false
     private var isReapplying = false
     private var isTerminating = false
     /// While a re-apply is writing parameters, property-change callbacks are
@@ -119,6 +131,7 @@ final class AccelerationController {
     private var lastAttemptFingerprint: Set<UInt64>?
     private var lastAttemptAt = Date.distantPast
     private var watchdogTimer: Timer?
+    private var watchdogTicks = 0
     private var activationObservers: [NSObjectProtocol] = []
     /// An external parameter change that arrived inside the settling window and
     /// still has to be re-applied (see `deferExternalChange`).
@@ -127,11 +140,18 @@ final class AccelerationController {
 
     /// How often the live pointer services are compared with the shaped ones.
     /// With all settings native the check does no work at all, and with an
-    /// unchanged service set it only enumerates registry IDs.
+    /// unchanged service set it only asks the kernel whether the shaped entries
+    /// still exist (see `shapedServicesStillPresent`).
     private static let watchdogInterval: TimeInterval = 2
     /// Spacing between repair attempts for the *same* service set when the
     /// apply keeps failing; the retry series already covers the first ~18 s.
     private static let watchdogFailureBackoff: TimeInterval = 30
+    /// Ticks between full re-enumerations even when every shaped service is
+    /// still alive (about a minute). The cheap kernel check answers "did a
+    /// shaped service disappear", which is the recurring revert; a full
+    /// enumeration also notices a service that *appeared* without a device
+    /// attach callback, and that does not need to be noticed within 2 s.
+    private static let watchdogFullSweepTicks = 30
 
     private(set) var lastError: String?
     /// Retained for API stability: this implementation intercepts no input and
@@ -200,8 +220,24 @@ final class AccelerationController {
         guard let number = UserDefaults.standard.object(forKey: defaultsKey) as? NSNumber else {
             return nil
         }
-        let raw = Int32((number.doubleValue * 65_536.0).rounded())
+        guard let raw = fixedScalingValue(number.doubleValue) else { return nil }
         return isPlausibleOriginal(raw) ? raw : nil
+    }
+
+    /// Converts a `com.apple.*.scaling` value to the IOFixed value the HID
+    /// parameter uses, or nil when it is not a tracking-speed setting.
+    ///
+    /// `Int32(Double)` traps on NaN, on ±inf and on anything outside `Int32`,
+    /// and these are ordinary global-domain user defaults: a script, a managed
+    /// preferences profile, a backup restore or an older build can leave any
+    /// value there. `init` reads all three managed keys, so an unvalidated
+    /// conversion made the app unlaunchable. The bound is the documented upper
+    /// end of the useful range and matches `isPlausibleOriginal`'s 196608 cap
+    /// (3.0 × 65536), so it rejects exactly the values the caller rejects and
+    /// nothing that could otherwise have been accepted.
+    nonisolated static func fixedScalingValue(_ value: Double) -> Int32? {
+        guard value.isFinite, abs(value) <= 3.0 else { return nil }
+        return Int32((value * 65_536.0).rounded())
     }
 
     /// The value to hand back to macOS for a key, guaranteed to be sane.
@@ -548,11 +584,28 @@ final class AccelerationController {
         // A retry series is already re-applying; never race it.
         guard retryWorkItem == nil, retryAttempt == 0 else { return }
 
-        // Always look through a freshly created connection. A long-lived
-        // IOHIDEventSystemClient does not reliably report services macOS
-        // created after it connected, and "the client cannot see the new
-        // service" is exactly how a reverted pointer stays unnoticed. The
-        // connection is cheap to create and nothing else depends on holding it.
+        // Cheap kernel check first, because re-reading the services is not
+        // cheap: a fresh `IOHIDEventSystemClientCreate` measured 104–138 ms
+        // (p50 114 ms) on this machine, and this used to run on the main thread
+        // twice a second. A user curve is cached in the filter instance of one
+        // service, so "every shaped registry entry still exists" is exactly
+        // "the shaping is still in place", and the IORegistry answers that in
+        // ~0.09 ms per service without a client. One full re-enumeration per
+        // `watchdogFullSweepTicks` still runs, so a service that appears without
+        // a device-attach callback is picked up within about a minute; a service
+        // that *disappears* (the recurring revert) is still noticed within one
+        // tick.
+        if appliedFingerprint != nil {
+            watchdogTicks += 1
+            let scheduledSweep = watchdogTicks % Self.watchdogFullSweepTicks == 0
+            if !scheduledSweep, shapedServicesStillPresent() { return }
+        }
+
+        // A state change is either a removed shaped service or a scheduled
+        // sweep, so the enumeration has to look through a freshly created
+        // connection: a client created earlier can keep returning service
+        // objects macOS has already replaced, and "the client cannot see the
+        // new service" is exactly how a reverted pointer stays unnoticed.
         bridge.refresh()
         let live = bridge.pointerServiceFingerprint()
         guard live != appliedFingerprint else { return }
@@ -572,6 +625,16 @@ final class AccelerationController {
         }
         let shaped = appliedFingerprint.map { "\($0.count)" } ?? "none"
         heal("HID services changed (shaped \(shaped), live \(live.count))", reason: reason)
+    }
+
+    /// True when every pointer service the last fully accepted apply shaped
+    /// still has a live IORegistry entry, i.e. the filter instances carrying the
+    /// user curves are the live ones. Returns false when no apply has been
+    /// accepted yet: without a shaped set there is nothing to ask about, and the
+    /// caller falls back to a full enumeration.
+    private func shapedServicesStillPresent() -> Bool {
+        guard let appliedFingerprint, !appliedFingerprint.isEmpty else { return false }
+        return bridge.registryEntriesExist(appliedFingerprint)
     }
 
     /// Re-creates the HID connections and applies again. Used when the services
@@ -628,6 +691,11 @@ final class AccelerationController {
         captureOriginalsIfNeeded()
         captureScrollOriginalsIfNeeded()
         suppressExternalChangesUntil = Date().addingTimeInterval(0.75)
+        isBatchingPersistence = true
+        defer {
+            isBatchingPersistence = false
+            flushPersistence()
+        }
 
         let services = bridge.pointerServices()
         let fingerprint = Self.fingerprint(of: services)
@@ -660,35 +728,71 @@ final class AccelerationController {
             rejected = rejected || scrollResult.rejected
             needsRetry = needsRetry || scrollResult.needsRetry
 
-            // Enumeration is stale (right after wake): leave the parameters
-            // alone rather than guessing a representation. Only after every
-            // retry with a fresh client has failed -- and only for the mouse
-            // class, which is where table-only devices live -- is an unreadable
-            // representation accepted as a genuine classic-table device. The
+            // Which representation each service of this class uses. The
+            // decision is per service: a table-only mouse attached next to a
+            // curve-capable one must not pull the whole class onto the
+            // index-scaling path, which used to clear the curve device's user
+            // curve (so it silently got macOS's native acceleration) and left
+            // its Speed control inert.
+            let classHasCurves = classServices.contains { $0.hasNativeCurves }
+            let curveServices = classServices.filter { $0.hasNativeCurves }
+            var tableServices = classServices.filter { !$0.hasNativeCurves && $0.hasAccelerationTable }
+            var unreadableServices = classServices.filter {
+                !$0.hasNativeCurves && !$0.hasAccelerationTable
+            }
+
+            // Enumeration is stale (right after wake): leave those services'
+            // parameters alone rather than guessing a representation. The
             // trackpad class is always curve-based (built-in and Magic
             // Trackpads), so a trackpad whose curves cannot be read is stale,
             // never a table device, and must never be index-scaled.
             //
-            // A mouse class with no curves on any service and no tables
-            // anywhere either is not stale: the device genuinely exposes
-            // neither representation (verified on USB mice whose registry
-            // entries carry no HIDAccelCurves and no acceleration table, with
-            // the filter falling back to its compiled-in default table).
-            // Retries can never resolve that, so route it to index scaling
-            // immediately instead of stalling every slider move for the full
-            // retry window.
-            let classHasCurves = classServices.contains { $0.hasNativeCurves }
-            let classHasTable = classServices.contains { $0.hasAccelerationTable }
-            let treatAsTable = pointerClass == .mouse && !classHasCurves
-                && (isFinalRetryAttempt || !classHasTable)
-            if route == .unresolved {
-                guard treatAsTable else {
+            // The mouse class is where table-only devices live, so it accepts
+            // the table interpretation -- but only on an independent signal
+            // that the service is real and settled, never because "the table is
+            // unreadable too". A service still being created, or a dead object
+            // from a client created before sleep, reports neither curves nor a
+            // table, which is exactly what a USB mouse with neither
+            // representation reports (verified: the filter then falls back to
+            // its compiled-in default table). Those two cases are told apart by
+            // the IORegistry entry: a live entry means the service is real (the
+            // curve and table readers already fall back to that same entry, so
+            // an unreadable representation is genuine for it), while a dead or
+            // missing entry means the enumeration is stale and only the final
+            // retry may give up and treat it as a table device.
+            if !unreadableServices.isEmpty {
+                let settled = unreadableServices.allSatisfy(\.hasLiveRegistryEntry)
+                let acceptAsTable = pointerClass == .mouse && !classHasCurves
+                    && (settled || isFinalRetryAttempt)
+                if acceptAsTable {
+                    DebugLog.write("apply: \(pointerClass) unreadable curves, using table scaling")
+                    tableServices += unreadableServices
+                    unreadableServices = []
+                } else {
+                    // Stale enumeration: do not guess a representation and do
+                    // not touch this class's parameters; the retry series
+                    // re-enumerates through a fresh client instead.
                     needsRetry = true
                     continue
                 }
-                DebugLog.write("apply: \(pointerClass) curves unreadable, using table scaling")
             }
-            let effectiveRoute: Route = route == .unresolved ? .indexScaling : route
+
+            if classServices.isEmpty {
+                // No device of this class is attached: hand the parameters
+                // back so macOS stays sane without it, and retry when the
+                // device is (or should be) present but has no HID service yet.
+                for key in keys {
+                    if !write(key, originalValue(forKey: key)) {
+                        rejected = true
+                        needsRetry = true
+                    }
+                }
+                if !clearOverrides(on: classServices) { rejected = true }
+                if amount < Threshold.native, retryMissingClasses.contains(pointerClass) {
+                    needsRetry = true
+                }
+                continue
+            }
 
             if amount <= Threshold.linear {
                 // No acceleration: a constant-gain user curve. User curves take
@@ -716,11 +820,14 @@ final class AccelerationController {
                 continue
             }
 
-            switch effectiveRoute {
-            case .curves:
-                // Parameters first, curves last (see the 0% branch above):
-                // curves only take effect while acceleration itself is enabled,
-                // and a parameter write must never follow the curve install.
+            if !curveServices.isEmpty {
+                // Curves first-class: the services that have them get the blend
+                // (or the hand-back), and the class parameter keeps its
+                // original index. Parameters first, curves last (see the 0%
+                // branch above): curves only take effect while acceleration
+                // itself is enabled, and a parameter write must never follow the
+                // curve install. Never clear a service that is about to receive
+                // a curve.
                 for key in keys {
                     if !write(key, originalValue(forKey: key)) {
                         rejected = true
@@ -729,54 +836,49 @@ final class AccelerationController {
                 }
                 if amount >= Threshold.native, abs(speed - 1.0) < 0.01 {
                     // Exactly macOS's own curve: hand control back.
-                    if !clearOverrides(on: classServices) { rejected = true }
+                    if !clearOverrides(on: curveServices) { rejected = true }
                 } else {
-                    if !installBlendedCurves(amount, speed: speed, on: classServices) {
+                    if !installBlendedCurves(amount, speed: speed, on: curveServices) {
                         rejected = true
                         needsRetry = true
                     }
                 }
-
-            case .indexScaling:
-                // Table-only devices (most third-party mice) do not expose
-                // parametric curves; amount is the table's own interpolation
-                // (scale the acceleration index). Speed cannot be scaled there.
-                if amount >= Threshold.native {
-                    for key in keys {
-                        if !write(key, originalValue(forKey: key)) {
-                            rejected = true
-                            needsRetry = true
-                        }
-                    }
-                } else {
-                    for key in keys {
-                        if !writeScaled(key, amount: amount) {
-                            rejected = true
-                            needsRetry = true
-                        }
-                    }
+                if !tableServices.isEmpty {
+                    // A mixed class cannot index-scale: the parameter is shared,
+                    // and scaling it would change which entry of the curve
+                    // device's own blended array the filter selects. The table
+                    // devices therefore keep macOS's acceleration, and only a
+                    // leftover user curve of ours (0% or an earlier session) is
+                    // cleared from them.
+                    if !clearOverrides(on: tableServices) { rejected = true }
+                    DebugLog.write(
+                        "apply: \(pointerClass) table-only service(s) keep macOS acceleration: "
+                            + tableServices.map(\.product).joined(separator: ", ")
+                    )
                 }
-                // A leftover user curve would override the scaled index.
-                if !clearOverrides(on: classServices) { rejected = true }
+                continue
+            }
 
-            case .absent:
-                // No device of this class is attached: hand the parameters
-                // back so macOS stays sane without it, and retry when the
-                // device is (or should be) present but has no HID service yet.
+            // Table-only devices (most third-party mice) do not expose
+            // parametric curves; amount is the table's own interpolation
+            // (scale the acceleration index). Speed cannot be scaled there.
+            if amount >= Threshold.native {
                 for key in keys {
                     if !write(key, originalValue(forKey: key)) {
                         rejected = true
                         needsRetry = true
                     }
                 }
-                if !clearOverrides(on: classServices) { rejected = true }
-                if amount < Threshold.native, retryMissingClasses.contains(pointerClass) {
-                    needsRetry = true
+            } else {
+                for key in keys {
+                    if !writeScaled(key, amount: amount) {
+                        rejected = true
+                        needsRetry = true
+                    }
                 }
-
-            case .unresolved:
-                needsRetry = true
             }
+            // A leftover user curve would override the scaled index.
+            if !clearOverrides(on: tableServices) { rejected = true }
         }
 
         classesWithServices = observedClasses
@@ -810,6 +912,11 @@ final class AccelerationController {
         // cached user curve, so it must not report success and drop the
         // snapshot; keep it for the next launch to repair.
         var rejected = !bridge.isAvailable
+        isBatchingPersistence = true
+        defer {
+            isBatchingPersistence = false
+            flushPersistence()
+        }
         // Clear the per-service user curves through the event system first; that
         // path does not need the IOHIDSystem parameter connection, so a failed
         // parameter reopen cannot leave the pointer shaped.
@@ -851,13 +958,18 @@ final class AccelerationController {
 
     // MARK: - Routing
 
-    /// Derives the shaping route from the services that are visible right now.
+    /// Summary of how a class is shaped, for the debug log only.
+    ///
+    /// The real decision is per service (see `performApply`): a class can hold
+    /// curve-capable and table-only devices at the same time, and shaping each
+    /// one through its own representation is what keeps one device's limitations
+    /// from changing another's feel. This label reports a class as `.curves` only
+    /// when every service has curves, `.indexScaling` only when every service is
+    /// table-only, and `.unresolved` for the mixed or unreadable cases.
     ///
     /// Parametric curves exist on Apple trackpads (and some Apple mice). Devices
     /// without them use the classic acceleration table, whose interpolation can
-    /// be driven by scaling the acceleration index instead. Services with
-    /// neither representation are treated as unresolved (stale enumeration);
-    /// the caller retries instead of guessing.
+    /// be driven by scaling the acceleration index instead.
     private static func route(for services: [HIDPointerService]) -> Route {
         guard !services.isEmpty else { return .absent }
         if services.allSatisfy({ $0.hasNativeCurves }) { return .curves }
@@ -934,10 +1046,11 @@ final class AccelerationController {
     /// parametric scroll curves (Apple trackpads) are shaped by blending those
     /// curves, while table-only devices (plain USB mice) are shaped by scaling
     /// the scroll acceleration index, which is exactly the default table's own
-    /// interpolation. Inversion negates the installed scroll gains, per
-    /// service, so a mouse wheel can run opposite the trackpad without
-    /// touching macOS's single global Natural-scroll switch and without
-    /// intercepting any events.
+    /// interpolation. Inversion installs a constant negative-gain curve per
+    /// service, so a mouse wheel can run opposite the trackpad without touching
+    /// macOS's single global Natural-scroll switch and without intercepting any
+    /// events; because that curve is linear, `invertScroll` replaces the Scroll
+    /// amount instead of shaping it, and the UI says so.
     ///
     /// Class isolation is structural: `classServices` only contains services
     /// whose own `HIDScrollAccelerationType` names this class, and parameter
@@ -992,11 +1105,10 @@ final class AccelerationController {
         let hasCurves = classServices.allSatisfy { $0.hasNativeScrollCurves }
         let useCurves = hasCurves || invert || abs(speed - 1.0) >= 0.01
         if useCurves {
-            // Blend (or linearize) the scroll curves, then flip the direction
-            // when inverted. User scroll curves take priority over both the
-            // parametric curves and the default table, so this also works for
-            // table-only mice. The curves are written per service, so they only
-            // ever shape the devices in this class.
+            // User scroll curves take priority over both the parametric curves
+            // and the default table, so this also works for table-only mice.
+            // The curves are written per service, so they only ever shape the
+            // devices in this class.
             var rejected = false
             var needsRetry = false
             // Scroll parameters first, curves last, for the same reason as the
@@ -1008,8 +1120,14 @@ final class AccelerationController {
                     needsRetry = true
                 }
             }
-            if hasCurves {
-                if !installBlendedScrollCurves(amount, speed: speed, invert: invert, on: classServices) {
+            // An inverted blended curve cannot work: negating the coefficients
+            // of the `sqrt` tail and of the even powers does not change their
+            // sign, so the inverted direction would only hold at very low speed
+            // and the tail would always scroll the original way. `invert`
+            // therefore always installs the constant negative-gain curve, and
+            // the Scroll amount is not applied (the UI states that).
+            if !invert, hasCurves {
+                if !installBlendedScrollCurves(amount, speed: speed, on: classServices) {
                     rejected = true
                     needsRetry = true
                 }
@@ -1046,7 +1164,6 @@ final class AccelerationController {
     private func installBlendedScrollCurves(
         _ amount: Double,
         speed: Double,
-        invert: Bool,
         on services: [HIDPointerService]
     ) -> Bool {
         guard !services.isEmpty else { return true }
@@ -1058,46 +1175,29 @@ final class AccelerationController {
                 continue
             }
             let blended = AccelerationCurveBuilder.curves(curves, factor: amount, speed: speed)
-            if !bridge.setScrollCurves(invert ? Self.negated(blended) : blended, on: service.ref) {
+            if !bridge.setScrollCurves(blended, on: service.ref) {
                 ok = false
             }
         }
         return ok
     }
 
-    /// Installs a pure constant-gain scroll curve at the chosen speed (and
-    /// direction). Works for parametric devices and for table-only devices
+    /// Installs a pure constant-gain scroll curve at the chosen speed and
+    /// direction. Works for parametric devices and for table-only devices
     /// alike, because user scroll curves take priority over both native
-    /// representations.
+    /// representations. This is the only inverted curve the filter can be given:
+    /// see `AccelerationCurveBuilder.constantCurves`.
     private func installConstantScrollCurves(speed: Double, invert: Bool, on services: [HIDPointerService]) -> Bool {
         guard !services.isEmpty else { return true }
         var ok = true
         for service in services {
             let source = service.nativeScrollCurves ?? [[HIDCurveKey.index: 0]]
-            let constant = AccelerationCurveBuilder.curves(source, factor: 0, speed: speed)
-            if !bridge.setScrollCurves(invert ? Self.negated(constant) : constant, on: service.ref) {
+            let constant = AccelerationCurveBuilder.constantCurves(source, speed: speed, invert: invert)
+            if !bridge.setScrollCurves(constant, on: service.ref) {
                 ok = false
             }
         }
         return ok
-    }
-
-    /// Negates the gain coefficients of scroll curves to flip the scroll
-    /// direction. Breakpoints (tangent speeds) are velocities, not gains, so
-    /// they are left untouched.
-    private static func negated(_ curves: [[String: Int]]) -> [[String: Int]] {
-        curves.map { curve in
-            var flipped = curve
-            for key in [
-                HIDCurveKey.gainLinear, HIDCurveKey.gainParabolic,
-                HIDCurveKey.gainCubic, HIDCurveKey.gainQuartic,
-            ] {
-                if let gain = flipped[key] {
-                    flipped[key] = -gain
-                }
-            }
-            return flipped
-        }
     }
 
     private func clearScrollOverrides(on services: [HIDPointerService]) -> Bool {
@@ -1151,6 +1251,8 @@ final class AccelerationController {
     }
 
     private func persistScrollOriginals() {
+        guard !isBatchingPersistence, persistedScrollOriginals != scrollOriginals else { return }
+        persistedScrollOriginals = scrollOriginals
         if scrollOriginals.isEmpty {
             store.clearScrollOriginals()
         } else {
@@ -1159,6 +1261,8 @@ final class AccelerationController {
     }
 
     private func persistScrollWrites() {
+        guard !isBatchingPersistence, persistedScrollWrites != scrollLastWritten else { return }
+        persistedScrollWrites = scrollLastWritten
         if scrollLastWritten.isEmpty {
             store.clearScrollWrites()
         } else {
@@ -1233,6 +1337,8 @@ final class AccelerationController {
     }
 
     private func persistOriginals() {
+        guard !isBatchingPersistence, persistedOriginals != originals else { return }
+        persistedOriginals = originals
         if originals.isEmpty {
             store.clearAccelerationOriginals()
         } else {
@@ -1241,11 +1347,21 @@ final class AccelerationController {
     }
 
     private func persistWrites() {
+        guard !isBatchingPersistence, persistedWrites != lastWritten else { return }
+        persistedWrites = lastWritten
         if lastWritten.isEmpty {
             store.clearAccelerationWrites()
         } else {
             store.saveAccelerationWrites(lastWritten)
         }
+    }
+
+    /// Writes every snapshot once. Called when a batched operation ends.
+    private func flushPersistence() {
+        persistOriginals()
+        persistWrites()
+        persistScrollOriginals()
+        persistScrollWrites()
     }
 
     // MARK: - External changes
@@ -1271,7 +1387,13 @@ final class AccelerationController {
         // A genuine external change is a good moment to re-enumerate: wake
         // rewrites can arrive around the same time, and a decision about the
         // shaping route must never be made from a stale event-system client.
-        bridge.refresh()
+        // Re-enumerating costs ~100 ms (the client create), so it is skipped
+        // while every shaped service is still alive; a dead service is reported
+        // below as an unreadable representation, which the retry series answers
+        // with the refresh this used to do unconditionally.
+        if !shapedServicesStillPresent() {
+            bridge.refresh()
+        }
         if Self.isScrollParameterKey(key) {
             guard let category = desired[pointerClass], !category.isScrollNative else { return }
             if Self.isPlausibleOriginal(raw) {
@@ -1299,8 +1421,12 @@ final class AccelerationController {
                 originals[key] = raw
                 persistOriginals()
                 // For index-scaled classes, a new base index has to be rescaled.
-                if Self.route(for: bridge.pointerServices().filter { Self.pointerClass(for: $0) == pointerClass })
-                    == .indexScaling {
+                // A class with any curve-capable service keeps its index: the
+                // curve devices select their entry from it (see `performApply`).
+                let classServices = bridge.pointerServices().filter {
+                    Self.pointerClass(for: $0) == pointerClass
+                }
+                if !classServices.isEmpty, !classServices.contains(where: { $0.hasNativeCurves }) {
                     _ = writeScaled(key, amount: category.accelerationAmount)
                 }
             }

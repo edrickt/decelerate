@@ -90,10 +90,13 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
     /// 1.0 = macOS's own scroll distance.
     var scrollSpeedMultiplier: Double = 1.0
 
-    /// Flips the scroll direction for this device class by negating the
-    /// installed scroll curves. Per-service, so the trackpad can stay natural
-    /// while a mouse wheel is inverted (macOS itself only offers one global
-    /// Natural-scroll switch for both).
+    /// Flips the scroll direction for this device class by installing a
+    /// constant negative-gain scroll curve. Per-service, so the trackpad can
+    /// stay natural while a mouse wheel is inverted (macOS itself only offers
+    /// one global Natural-scroll switch for both). A negated curve cannot stay
+    /// negative (see `AccelerationCurveBuilder.constantCurves`), so the curve is
+    /// linear and `scrollAccelerationAmount` is not applied while inverted; the
+    /// UI disables that slider and says so.
     var invertScroll: Bool = false
 
     var isLinear: Bool { accelerationAmount <= 0.005 }
@@ -134,26 +137,39 @@ struct CategoryPreferences: Codable, Equatable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let amount = try container.decodeIfPresent(Double.self, forKey: .accelerationAmount) {
-            // Values written by a future/buggy build must never reach the HID
-            // path or the sliders out of range; the Speed decoder already
-            // clamps for the same reason.
+        // Every field is decoded on its own. `decodeIfPresent` only returns nil
+        // when the key is absent or null, and a key with the wrong type throws;
+        // letting that throw escape discarded the whole blob, so one bad field
+        // reset *both* classes to defaults and applied them to the HID system.
+        // A field that cannot be read now falls back to its default and the
+        // readable fields survive. Values written by a future/buggy build must
+        // never reach the HID path or the sliders out of range, so the clamps
+        // stay.
+        func value<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+            guard let decoded = try? container.decodeIfPresent(type, forKey: key) else { return nil }
+            return decoded
+        }
+
+        if let amount = value(Double.self, .accelerationAmount) {
             accelerationAmount = min(max(amount, 0), 1)
-        } else if let removed = try container.decodeIfPresent(Bool.self, forKey: .removeAcceleration) {
+        } else if let removed = value(Bool.self, .removeAcceleration) {
             // Version 1.0 stored a boolean; true meant "fully linear".
             accelerationAmount = removed ? 0 : 1
+        } else if let removed = value(Int.self, .removeAcceleration) {
+            // A JSON/plist round trip can turn that boolean into 0/1.
+            accelerationAmount = removed != 0 ? 0 : 1
         } else {
             accelerationAmount = 0.5
         }
-        let decodedSpeed = try container.decodeIfPresent(Double.self, forKey: .speedMultiplier) ?? 1.5
+        let decodedSpeed = value(Double.self, .speedMultiplier) ?? 1.5
         speedMultiplier = min(max(decodedSpeed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
         // Scroll keys are new: installs that predate them decode as native
         // (scroll untouched), which preserves the previous behavior.
-        let decodedScrollAmount = try container.decodeIfPresent(Double.self, forKey: .scrollAccelerationAmount) ?? 1.0
+        let decodedScrollAmount = value(Double.self, .scrollAccelerationAmount) ?? 1.0
         scrollAccelerationAmount = min(max(decodedScrollAmount, 0), 1)
-        let decodedScrollSpeed = try container.decodeIfPresent(Double.self, forKey: .scrollSpeedMultiplier) ?? 1.0
+        let decodedScrollSpeed = value(Double.self, .scrollSpeedMultiplier) ?? 1.0
         scrollSpeedMultiplier = min(max(decodedScrollSpeed, SpeedScale.minimumSpeed), SpeedScale.maximumSpeed)
-        invertScroll = try container.decodeIfPresent(Bool.self, forKey: .invertScroll) ?? false
+        invertScroll = value(Bool.self, .invertScroll) ?? false
     }
 
     func encode(to encoder: Encoder) throws {

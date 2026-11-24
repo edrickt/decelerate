@@ -44,11 +44,31 @@ enum AccelerationCurveBuilder {
         let f = min(max(factor, 0), 1)
         let s = min(max(speed, 0.1), 8)
         if f <= 0.005 {
-            return native.map { constantGainCurve(index: $0[HIDCurveKey.index] ?? 0, gain: s) }
+            return constantCurves(native, speed: s, invert: false)
         }
         return native.map { curve in
             blendedCurve(curve, factor: f, speed: s)
         }
+    }
+
+    /// A constant-gain curve at `speed`, optionally inverted.
+    ///
+    /// This is the only curve that can be inverted. Negating the gains of a
+    /// blended curve does not flip its direction: the filter's first segment is
+    /// `GL·v + (GP·v)² + (GC·v)³ + (GQ·v)⁴`, so negating `GP`/`GC`/`GQ` flips only
+    /// the odd powers and the quadratic term keeps its sign, and the
+    /// high-velocity segment is `sqrt(m·v + b)`, which cannot be negative at
+    /// all. A constant curve has no higher-order terms and no tangent speeds
+    /// (`GP = GC = GQ = TSL = TSPR = 0`), so its output is exactly `gain · v` at
+    /// every velocity — provably negative for a negative gain.
+    static func constantCurves(
+        _ native: [[String: Int]],
+        speed: Double,
+        invert: Bool
+    ) -> [[String: Int]] {
+        let clamped = min(max(speed, 0.1), 8)
+        let gain = invert ? -clamped : clamped
+        return native.map { constantGainCurve(index: $0[HIDCurveKey.index] ?? 0, gain: gain) }
     }
 
     private static func constantGainCurve(index: Int, gain: Double) -> [String: Int] {

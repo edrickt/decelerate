@@ -82,6 +82,12 @@ struct HIDPointerService {
     let nativeScrollCurves: [[String: Int]]?
     /// Value of `HIDScrollAccelerationType` (e.g. "HIDMouseScrollAcceleration").
     let scrollAccelerationType: String?
+    /// True when the service still has a live IORegistry entry, i.e. it is a
+    /// real, settled device and not a dead object from a client created before
+    /// sleep. An unreadable acceleration representation on a settled service is
+    /// the device's actual encoding; on an unsettled one it means the
+    /// enumeration is stale.
+    let hasLiveRegistryEntry: Bool
 
     var isTrackpad: Bool {
         accelerationType == HIDPropertyKey.trackpadAcceleration
@@ -177,7 +183,8 @@ final class HIDServiceBridge {
                 nativeCurves: curves(of: ref),
                 nativeTable: table(of: ref),
                 nativeScrollCurves: scrollCurves(of: ref),
-                scrollAccelerationType: string(ref, HIDPropertyKey.scrollAccelerationType)
+                scrollAccelerationType: string(ref, HIDPropertyKey.scrollAccelerationType),
+                hasLiveRegistryEntry: registryEntryExists(ref)
             ))
         }
         return result
@@ -257,6 +264,44 @@ final class HIDServiceBridge {
 
     private func idOf(_ service: IOHIDServiceClient) -> UInt64 {
         (IOHIDServiceClientGetRegistryID(service) as? NSNumber)?.uint64Value ?? 0
+    }
+
+    /// True when every one of these registry IDs still has a live IORegistry
+    /// entry.
+    ///
+    /// The per-service user curve is cached in the filter instance that belongs
+    /// to one service, so "the service object is gone" is exactly "the curve is
+    /// gone". The IORegistry is kernel state, so this cannot be fooled by a
+    /// stale event-system client, and the lookup costs microseconds where a
+    /// fresh `IOHIDEventSystemClientCreate` costs ~100 ms on this machine. It is
+    /// therefore the cheap change signal for the applied-state watchdog.
+    ///
+    /// A terminated service is no longer matched by `IOServiceGetMatchingService`,
+    /// and entries that are not `IOService` objects (the registry root, for
+    /// example) are reported as absent, which is what the caller wants: only a
+    /// live service that can carry a filter instance counts.
+    func registryEntriesExist(_ ids: Set<UInt64>) -> Bool {
+        for registryID in ids {
+            guard registryID != 0, let matching = IORegistryEntryIDMatching(registryID) else { return false }
+            let entry = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+            guard entry != 0 else { return false }
+            IOObjectRelease(entry)
+        }
+        return true
+    }
+
+    /// True when this service still has a live IORegistry entry. Used to tell a
+    /// real device whose acceleration representation genuinely cannot be read
+    /// (USB mice: no `HIDAccelCurves` and no table, the filter falls back to its
+    /// compiled-in default table) from a dead service object that a client
+    /// created before sleep keeps returning.
+    func registryEntryExists(_ service: IOHIDServiceClient) -> Bool {
+        let id = idOf(service)
+        guard id != 0, let matching = IORegistryEntryIDMatching(id) else { return false }
+        let entry = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard entry != 0 else { return false }
+        IOObjectRelease(entry)
+        return true
     }
 
     /// Read-only lookup of one IORegistry entry property by registry ID.

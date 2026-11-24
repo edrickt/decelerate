@@ -125,6 +125,9 @@ struct PreferencesStore {
 
     private func decode<T: Decodable>(_ key: String) -> T? {
         guard let data = defaults.data(forKey: key) else { return nil }
+        // A throw here now only means "not a JSON object we can read", because
+        // `CategoryPreferences` decodes each field independently, so a single
+        // wrong-typed field no longer throws the whole blob away.
         return try? JSONDecoder().decode(T.self, from: data)
     }
 }
